@@ -1,0 +1,21 @@
+[Unit]
+Description=SPH Video Probe Server (微信视频号探针)
+After=network.target
+
+[Service]
+Type=simple
+User=sph
+Group=sph
+WorkingDirectory=/opt/sph
+# 前缀 - 表示 .env 缺失时服务仍可启动（防止误删配置导致起不来）
+EnvironmentFile=-/opt/sph/.env
+# node:sqlite 需要 Node 22.5+，请确保 /usr/bin/node 是 22+（部署脚本会自动安装）
+ExecStart=/usr/bin/node /opt/sph/scripts/sph-dev-server.mjs
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/sph/data
+
+[Install]
+WantedBy=multi-user.target

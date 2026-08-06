@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>解析统计 · 视频号探针</title>
+  <link rel="shortcut icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" href="/icon.png">
+  <style>
+    :root {
+      --bg: #F7F7F7;
+      --card: #FFFFFF;
+      --line: #E8E8E8;
+      --ink: #191919;
+      --ink-2: #7A7A7A;
+      --ink-3: #B2B2B2;
+      --green: #07C160;
+      --green-deep: #06AD56;
+      --green-soft: #E8F8EF;
+      --danger: #FA5151;
+      --danger-soft: #FDECEC;
+      --r-sm: 8px;
+      --r-md: 12px;
+      --mono: "SF Mono", "Cascadia Code", Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 24px; max-width: 1080px; margin: 0 auto;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 800; }
+    .brand-mark {
+      width: 26px; height: 26px; border-radius: 8px; background: var(--green);
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .brand-mark::after {
+      content: ""; width: 0; height: 0;
+      border-style: solid; border-width: 5px 0 5px 8px;
+      border-color: transparent transparent transparent #fff;
+      margin-left: 2px;
+    }
+    .topbar .right { display: flex; gap: 10px; align-items: center; }
+    .btn {
+      padding: 7px 16px; border: 1px solid var(--line); border-radius: 999px;
+      background: var(--card); color: var(--ink-2); font-size: 12.5px; font-weight: 600;
+      cursor: pointer; transition: all .15s;
+    }
+    .btn:hover { border-color: var(--green); color: var(--green-deep); }
+    .btn.primary { background: var(--green); border-color: var(--green); color: #fff; }
+    .btn.primary:hover { background: var(--green-deep); color: #fff; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 40px; }
+
+    /* 认证横幅 */
+    .auth-banner {
+      max-width: 1080px; margin: 0 auto 20px; padding: 0 24px;
+    }
+    .auth-card {
+      background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md);
+      padding: 18px 22px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    }
+    .auth-card input[type="password"] {
+      flex: 1; min-width: 220px; padding: 9px 12px;
+      border: 1px solid var(--line); border-radius: var(--r-sm); font-size: 13.5px; outline: none;
+    }
+    .auth-card input:focus { border-color: var(--green); }
+    .auth-card .hint { font-size: 12.5px; color: var(--ink-3); }
+
+    /* 总览卡片 */
+    .overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
+    .stat-card {
+      background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md);
+      padding: 16px 18px;
+    }
+    .stat-card .label { font-size: 12px; color: var(--ink-3); font-weight: 600; letter-spacing: .05em; }
+    .stat-card .value { font-size: 26px; font-weight: 800; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .stat-card .sub { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
+    .stat-card .value.green { color: var(--green-deep); }
+    .stat-card .value.red { color: var(--danger); }
+
+    /* 图表卡片 */
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+    .chart-card {
+      background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md);
+      padding: 16px 18px;
+    }
+    .chart-card h3 { font-size: 13.5px; font-weight: 700; margin-bottom: 12px; }
+    .chart-card .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--ink-2); margin-bottom: 8px; }
+    .chart-card .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+    svg text { font-family: var(--mono); }
+
+    /* 排行 */
+    .lists { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+    @media (max-width: 860px) { .lists { grid-template-columns: 1fr; } }
+    .list-card {
+      background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md); padding: 16px 18px;
+    }
+    .list-card h3 { font-size: 13.5px; font-weight: 700; margin-bottom: 10px; }
+    .list-card ol { list-style: none; }
+    .list-card li {
+      display: flex; gap: 10px; align-items: center; padding: 6px 0;
+      border-bottom: 1px dashed var(--line); font-size: 12.5px;
+    }
+    .list-card li:last-child { border-bottom: none; }
+    .list-card .rank {
+      flex-shrink: 0; width: 20px; height: 20px; border-radius: 6px;
+      background: var(--bg); color: var(--ink-2); font-size: 11px; font-weight: 700;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .list-card li:nth-child(1) .rank { background: var(--green); color: #fff; }
+    .list-card li:nth-child(2) .rank { background: var(--green-soft); color: var(--green-deep); }
+    .list-card .txt { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
+    .list-card .num { flex-shrink: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+    /* 明细表 */
+    .table-card {
+      background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md);
+      padding: 16px 18px; margin-bottom: 20px; overflow-x: auto;
+    }
+    .table-card h3 { font-size: 13.5px; font-weight: 700; margin-bottom: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th { color: var(--ink-3); font-weight: 600; font-size: 11px; }
+    td.url { max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+    td.err { max-width: 200px; overflow: hidden; text-overflow: ellipsis; color: var(--danger); }
+    .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+    .pill.ok { background: var(--green-soft); color: var(--green-deep); }
+    .pill.fail { background: var(--danger-soft); color: var(--danger); }
+    .pill.src { background: var(--bg); color: var(--ink-2); }
+
+    .empty { text-align: center; color: var(--ink-3); padding: 60px 0; font-size: 13px; }
+    .toast {
+      position: fixed; left: 50%; bottom: 36px; transform: translateX(-50%) translateY(8px);
+      background: rgba(25,25,25,.92); color: #fff; font-size: 13px; padding: 10px 18px;
+      border-radius: 999px; opacity: 0; pointer-events: none; transition: all .2s; z-index: 99;
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .toast.error { background: rgba(250,81,81,.95); }
+    :focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>解析统计</span>
+    </div>
+    <div class="right">
+      <a class="btn" href="/" style="text-decoration:none">返回首页</a>
+      <button class="btn" id="refreshBtn" disabled>刷新</button>
+    </div>
+  </header>
+
+  <div class="auth-banner" id="authBanner">
+    <div class="auth-card">
+      <input type="password" id="authPassword" placeholder="管理员密码" autocomplete="off">
+      <button class="btn primary" id="authSubmit">进入统计</button>
+      <span class="hint">统计包含访问 IP / UA / 解析链接等明细，仅管理员可见</span>
+    </div>
+  </div>
+
+  <main class="wrap" id="content" hidden>
+    <div class="overview" id="overview"></div>
+    <div class="grid">
+      <div class="chart-card">
+        <h3>近 14 天解析趋势</h3>
+        <div class="legend"><span><i style="background:var(--green)"></i>成功</span><span><i style="background:var(--danger)"></i>失败</span></div>
+        <div id="dailyChart"></div>
+      </div>
+      <div class="chart-card">
+        <h3>近 3 天时段分布（东八区）</h3>
+        <div class="legend"><span><i style="background:var(--green)"></i>成功</span><span><i style="background:var(--danger)"></i>失败</span></div>
+        <div id="hourlyChart"></div>
+      </div>
+    </div>
+    <div class="lists">
+      <div class="list-card"><h3>热门解析链接 Top 10</h3><ol id="topUrls"></ol></div>
+      <div class="list-card"><h3>访客 IP Top 10</h3><ol id="topIps"></ol></div>
+      <div class="list-card"><h3>错误类型</h3><ol id="topErrors"></ol></div>
+      <div class="list-card"><h3>平台分布</h3><ol id="platforms"></ol></div>
+      <div class="list-card"><h3>Cookie 来源</h3><ol id="cookieSources"></ol></div>
+    </div>
+    <div class="table-card">
+      <h3>最近 50 条解析记录</h3>
+      <table>
+        <thead>
+          <tr><th>时间</th><th>IP</th><th>链接</th><th>状态</th><th>Cookie</th><th>耗时</th><th>错误</th></tr>
+        </thead>
+        <tbody id="recentRows"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    const API_BASE = "/api";
+    const TOKEN_KEY = "sph_admin_token_v1";
+    const $ = (id) => document.getElementById(id);
+    const toast = $("toast");
+
+    function showToast(msg, isError) {
+      toast.textContent = msg;
+      toast.className = "toast show" + (isError ? " error" : "");
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => { toast.className = "toast"; }, 2600);
+    }
+    function getToken() { try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
+    function setToken(t) { try { sessionStorage.setItem(TOKEN_KEY, t); } catch (e) { /* ignore */ } }
+    function clearToken() { try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ } }
+
+    function esc(s) {
+      if (s === null || s === undefined) return "";
+      const div = document.createElement("div");
+      div.textContent = String(s);
+      return div.innerHTML;
+    }
+    function fmtTime(unixSec) {
+      const d = new Date(Number(unixSec) * 1000);
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+
+    /* ---------- SVG 图表 ---------- */
+    function barChart(el, data, getLabel, getSuccess, getFailed, height) {
+      const W = 660, H = height || 200, PL = 34, PB = 22, PT = 10, PR = 8;
+      const cw = W - PL - PR;
+      const max = Math.max(1, ...data.map((d) => (getSuccess(d) || 0) + (getFailed(d) || 0)));
+      const bw = Math.max(3, cw / data.length * 0.62);
+      const gap = cw / data.length;
+      let bars = "";
+      data.forEach((d, i) => {
+        const x = PL + i * gap + (gap - bw) / 2;
+        const s = getSuccess(d) || 0, f = getFailed(d) || 0;
+        const hs = (s / max) * (H - PT - PB), hf = (f / max) * (H - PT - PB);
+        const y = H - PB;
+        if (hf > 0) bars += `<rect x="${x.toFixed(1)}" y="${(y - hf).toFixed(1)}" width="${bw.toFixed(1)}" height="${hf.toFixed(1)}" rx="1.5" fill="var(--danger)"/>`;
+        if (hs > 0) bars += `<rect x="${x.toFixed(1)}" y="${(y - hf - hs).toFixed(1)}" width="${bw.toFixed(1)}" height="${hs.toFixed(1)}" rx="1.5" fill="var(--green)"/>`;
+        if (i % Math.ceil(data.length / 8) === 0 || i === data.length - 1) {
+          bars += `<text x="${(x + bw / 2).toFixed(1)}" y="${H - 6}" font-size="9" fill="var(--ink-3)" text-anchor="middle">${esc(getLabel(d))}</text>`;
+        }
+      });
+      // 网格线
+      let grid = "";
+      for (let g = 0; g <= 4; g++) {
+        const gy = PT + (g / 4) * (H - PT - PB);
+        grid += `<line x1="${PL}" y1="${gy.toFixed(1)}" x2="${W - PR}" y2="${gy.toFixed(1)}" stroke="var(--line)" stroke-width="0.6"/>`;
+      }
+      el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">${grid}${bars}</svg>`;
+    }
+
+    /* ---------- 渲染 ---------- */
+    function renderOverview(o) {
+      const rate = o.total ? Math.round((o.success / o.total) * 100) : 0;
+      $("overview").innerHTML = `
+        <div class="stat-card"><div class="label">总解析次数</div><div class="value">${o.total}</div><div class="sub">累计</div></div>
+        <div class="stat-card"><div class="label">今日解析</div><div class="value">${o.today}</div><div class="sub">成功 ${o.todaySuccess}</div></div>
+        <div class="stat-card"><div class="label">成功率</div><div class="value ${rate >= 90 ? "green" : "red"}">${rate}%</div><div class="sub">成功 ${o.success} / 失败 ${o.failed}</div></div>
+        <div class="stat-card"><div class="label">平均耗时</div><div class="value">${o.avgDurationMs ? Math.round(o.avgDurationMs) : "-"}</div><div class="sub">毫秒 / 次</div></div>`;
+    }
+    function renderDaily(list) {
+      if (!list.length) { $("dailyChart").innerHTML = '<div class="empty">暂无数据</div>'; return; }
+      barChart($("dailyChart"), list, (d) => d.day.slice(5), (d) => d.success, (d) => d.failed);
+    }
+    function renderHourly(list) {
+      if (!list.length) { $("hourlyChart").innerHTML = '<div class="empty">暂无数据</div>'; return; }
+      barChart($("hourlyChart"), list, (d) => d.hour, (d) => d.success, (d) => d.failed);
+    }
+    function renderRank(el, list, fmt) {
+      el.innerHTML = "";
+      if (!list.length) {
+        const li = document.createElement("li");
+        li.textContent = "暂无数据";
+        li.style.color = "var(--ink-3)";
+        el.appendChild(li);
+        return;
+      }
+      list.forEach((item, i) => {
+        const li = document.createElement("li");
+        const rank = document.createElement("span");
+        rank.className = "rank";
+        rank.textContent = i + 1;
+        const txt = document.createElement("span");
+        txt.className = "txt";
+        txt.textContent = item.label || "-";
+        txt.title = txt.textContent;
+        const num = document.createElement("span");
+        num.className = "num";
+        num.textContent = item.count;
+        li.append(rank, txt, num);
+        el.appendChild(li);
+      });
+    }
+    function renderRecent(rows) {
+      const tbody = $("recentRows");
+      tbody.innerHTML = "";
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--ink-3)">暂无记录</td></tr>';
+        return;
+      }
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${esc(fmtTime(r.ts))}</td>
+          <td>${esc(r.ip || "-")}</td>
+          <td class="url" title="${esc(r.shareUrl)}">${esc(r.shareUrl || "-")}</td>
+          <td><span class="pill ${r.ok ? "ok" : "fail"}">${r.ok ? "成功" : "失败"}</span></td>
+          <td><span class="pill src">${esc(r.cookieSource || "-")}</span></td>
+          <td>${r.durationMs != null ? r.durationMs + "ms" : "-"}</td>
+          <td class="err" title="${esc(r.error)}">${esc(r.error || "-")}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    /* ---------- 数据加载 ---------- */
+    async function loadStats() {
+      try {
+        const resp = await fetch(`${API_BASE}/admin/stats`, {
+          headers: { Authorization: "Bearer " + getToken() },
+        });
+        if (resp.status === 401) throw new Error("unauthorized");
+        const data = await resp.json();
+        if (!data.ok) throw new Error(data.message || "加载失败");
+        $("authBanner").hidden = true;
+        $("content").hidden = false;
+        $("refreshBtn").disabled = false;
+        renderOverview(data.overview);
+        renderDaily(data.daily);
+        renderHourly(data.hourly);
+        renderRank($("topUrls"), data.topUrls.map((x) => ({ label: x.url, count: x.count })));
+        renderRank($("topIps"), data.topIps.map((x) => ({ label: x.ip || "未知", count: x.count })));
+        renderRank($("topErrors"), data.errors.map((x) => ({ label: x.error || "未知错误", count: x.count })));
+        renderRank($("platforms"), data.platforms.map((x) => ({ label: x.platform === "sph" ? "视频号" : x.platform === "yt" ? "YouTube" : x.platform, count: x.count })));
+        renderRank($("cookieSources"), data.cookieSources.map((x) => ({ label: x.source || "none", count: x.count })));
+        renderRecent(data.recent);
+      } catch (e) {
+        if (e.message === "unauthorized") {
+          clearToken();
+          $("content").hidden = true;
+          $("authBanner").hidden = false;
+          $("authPassword").focus();
+        } else {
+          showToast("加载失败：" + e.message, true);
+        }
+      }
+    }
+
+    /* ---------- 认证 ---------- */
+    $("authSubmit").addEventListener("click", async () => {
+      const password = $("authPassword").value.trim();
+      if (!password) { showToast("请输入密码", true); return; }
+      try {
+        const resp = await fetch(`${API_BASE}/admin_auth`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        const data = await resp.json();
+        if (data.ok && data.token) {
+          setToken(data.token);
+          $("authPassword").value = "";
+          await loadStats();
+        } else {
+          showToast(data.message || "认证失败", true);
+        }
+      } catch (e) {
+        showToast("认证失败：" + e.message, true);
+      }
+    });
+    $("authPassword").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") $("authSubmit").click();
+    });
+    $("refreshBtn").addEventListener("click", loadStats);
+
+    // 已有 token 直接加载
+    if (getToken()) loadStats();
+    else $("authPassword").focus();
+  </script>
+</body>
+</html>

@@ -1,0 +1,2107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- 个性化站点：改这里即可更换品牌名 -->
+  <title>视频号探针 · 链接解析</title>
+  <link rel="shortcut icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" href="/icon.png">
+  <style>
+    /* ============ 设计令牌 ============ */
+    :root {
+      --bg: #F7F7F7;            /* 微信会话底色 */
+      --card: #FFFFFF;
+      --line: #E8E8E8;
+      --ink: #191919;
+      --ink-2: #7A7A7A;
+      --ink-3: #B2B2B2;
+      --green: #07C160;         /* 微信绿 */
+      --green-deep: #06AD56;
+      --green-soft: #E8F8EF;
+      --danger: #FA5151;
+      --r-sm: 8px;
+      --r-md: 12px;
+      --r-lg: 16px;
+      --shadow: 0 2px 12px rgba(0, 0, 0, .06);
+      --mono: "SF Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI",
+        "Microsoft YaHei", "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.6;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    /* ============ 顶栏 ============ */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      max-width: 920px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    /* 平台切换 */
+    .platform-tabs {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      gap: 6px;
+    }
+    .ptab {
+      padding: 7px 22px;
+      border: 1px solid var(--line);
+      border-radius: 999px 999px 0 0;
+      background: var(--bg);
+      color: var(--ink-2);
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .15s;
+      border-bottom: none;
+    }
+    .ptab.active {
+      background: var(--card);
+      color: var(--green-deep);
+      border-color: var(--line);
+      box-shadow: 0 -2px 8px rgba(0,0,0,.04);
+    }
+    .ptab:hover:not(.active) { color: var(--green-deep); }
+    .ptab[hidden] { display: none; }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: .02em;
+    }
+    /* 品牌徽标：微信绿圆角方块 + 白色播放三角 */
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: var(--green);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .brand-mark::after {
+      content: "";
+      width: 0;
+      height: 0;
+      border-style: solid;
+      border-width: 5px 0 5px 8px;
+      border-color: transparent transparent transparent #fff;
+      margin-left: 2px;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--ink-2);
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 12px;
+    }
+    .status-pill .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: breathe 2.4s ease-in-out infinite;
+    }
+    @keyframes breathe {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .35; }
+    }
+
+    /* ============ 主舞台：频道卡片布局 ============ */
+    .stage {
+      flex: 1;
+      width: 100%;
+      max-width: 920px;
+      margin: 8px auto 0;
+      padding: 0 24px 32px;
+      display: flex;
+      gap: 24px;
+      align-items: flex-start;
+      justify-content: center;
+    }
+
+    /* 左侧：9:16 探针画布 */
+    .canvas {
+      position: relative;
+      width: 340px;
+      max-width: 100%;
+      aspect-ratio: 9 / 16;
+      background: #101010;
+      border-radius: var(--r-lg);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* 画布底纹：探针网格 */
+    .canvas::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+      background-size: 24px 24px;
+      pointer-events: none;
+    }
+
+    /* 解析扫描线 */
+    .scan {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--green), transparent);
+      box-shadow: 0 0 12px rgba(7, 193, 96, .8);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .canvas.scanning .scan {
+      opacity: 1;
+      animation: sweep 1.1s cubic-bezier(.4, 0, .2, 1) infinite;
+    }
+    @keyframes sweep {
+      0% { top: 6%; }
+      50% { top: 94%; }
+      100% { top: 6%; }
+    }
+
+    .canvas video,
+    .canvas img.cover {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #000;
+    }
+    .canvas video { object-fit: contain; }
+
+    /* 空状态：粘贴区直接叠在画布上 */
+    .empty {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      padding: 28px 22px;
+      text-align: center;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 18px;
+    }
+    .empty .probe-ring {
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,.22);
+      border-top-color: var(--green);
+      animation: spin 1.6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .empty h2 {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+    .empty p {
+      font-size: 12px;
+      color: rgba(255,255,255,.55);
+    }
+    .empty .input-row {
+      width: 100%;
+      display: flex;
+      gap: 8px;
+    }
+    .empty input {
+      flex: 1;
+      min-width: 0;
+      padding: 11px 14px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: var(--r-sm);
+      background: rgba(255,255,255,.08);
+      color: #fff;
+      font-size: 13px;
+      outline: none;
+      transition: border-color .15s, background .15s;
+    }
+    .empty input::placeholder { color: rgba(255,255,255,.38); }
+    .empty input:focus {
+      border-color: var(--green);
+      background: rgba(255,255,255,.12);
+    }
+    .empty .primary {
+      padding: 11px 22px;
+      border: none;
+      border-radius: var(--r-sm);
+      background: var(--green);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background .15s, transform .05s;
+    }
+    .empty .primary:hover { background: var(--green-deep); }
+    .empty .primary:active { transform: scale(.97); }
+    .empty .primary:disabled { background: #8FD9AC; cursor: not-allowed; }
+    .empty .example {
+      font-size: 12px;
+      color: rgba(255,255,255,.5);
+      border-bottom: 1px dashed rgba(255,255,255,.3);
+      cursor: pointer;
+      transition: color .15s;
+    }
+    .empty .example:hover { color: var(--green); }
+    .empty .examples {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .empty .ex-chip {
+      display: block;
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: var(--r-sm);
+      background: rgba(255,255,255,.06);
+      color: rgba(255,255,255,.85);
+      font-size: 12.5px;
+      text-align: left;
+      cursor: pointer;
+      transition: all .15s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .empty .ex-chip .ex-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 2px;
+    }
+    .empty .ex-chip .ex-tag {
+      flex-shrink: 0;
+      padding: 1px 8px;
+      border-radius: 999px;
+      background: rgba(255, 215, 0, .16);
+      color: #FFD700;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      line-height: 1.5;
+    }
+    .empty .ex-chip:hover { border-color: var(--green); background: rgba(7,193,96,.15); }
+    .canvas .status-overlay {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 2;
+      padding: 10px 14px;
+      font-size: 12px;
+      color: #fff;
+      background: linear-gradient(transparent, rgba(0,0,0,.72));
+      text-align: center;
+      display: none;
+    }
+    .canvas .status-overlay.error { color: #FFB3B3; }
+
+    /* ============ 右侧：信息面板 ============ */
+    .panel {
+      flex: 1;
+      min-width: 0;
+      max-width: 480px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow);
+      padding: 20px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .panel[hidden] { display: none; }
+
+    .sec-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .18em;
+      color: var(--green);
+      text-transform: uppercase;
+    }
+
+    /* 作者行 */
+    .author {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .author img.avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      object-fit: cover;
+      background: var(--bg);
+    }
+    .author .name {
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .author .auth-icon {
+      width: 15px;
+      height: 15px;
+      vertical-align: -2px;
+    }
+    .author .time {
+      margin-left: auto;
+      font-size: 12px;
+      color: var(--ink-3);
+    }
+
+    .desc {
+      font-size: 14px;
+      color: var(--ink);
+      line-height: 1.7;
+      word-break: break-all;
+      white-space: pre-wrap;
+      max-height: 132px;
+      overflow-y: auto;
+    }
+
+    /* 数据胶囊 */
+    .stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .stat {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      background: var(--bg);
+      color: var(--ink-2);
+      font-size: 12.5px;
+      font-weight: 500;
+    }
+
+    /* 质量选择 */
+    .quality-tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .quality-tab {
+      padding: 5px 14px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--card);
+      font-size: 12.5px;
+      color: var(--ink-2);
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .quality-tab.active {
+      background: var(--green-soft);
+      border-color: var(--green);
+      color: var(--green-deep);
+      font-weight: 600;
+    }
+    .quality-tab:hover:not(.active) { border-color: var(--green); color: var(--green-deep); }
+
+    /* 操作区 */
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 9px 18px;
+      border-radius: var(--r-sm);
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--ink);
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all .15s;
+    }
+    .btn:hover { border-color: var(--green); color: var(--green-deep); }
+    .btn:active { transform: scale(.98); }
+    .btn.primary {
+      background: var(--green);
+      border-color: var(--green);
+      color: #fff;
+    }
+    .btn.primary:hover { background: var(--green-deep); color: #fff; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* 链接明细 */
+    .links { display: flex; flex-direction: column; gap: 8px; }
+    .link-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--ink-2);
+    }
+    .link-row .label {
+      flex-shrink: 0;
+      width: 52px;
+      font-weight: 600;
+      color: var(--ink-3);
+    }
+    .link-row code {
+      flex: 1;
+      min-width: 0;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--green-deep);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+    .link-row code:hover { text-decoration: underline; }
+
+    /* 原始 JSON */
+    details.json {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    details.json summary {
+      cursor: pointer;
+      font-size: 12.5px;
+      color: var(--ink-2);
+      font-weight: 600;
+      user-select: none;
+    }
+    details.json pre {
+      margin-top: 10px;
+      padding: 12px;
+      background: var(--bg);
+      border-radius: var(--r-sm);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.55;
+      color: var(--ink-2);
+      overflow-x: auto;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    /* 最近解析 */
+    .history { border-top: 1px solid var(--line); padding-top: 12px; }
+    .history .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--bg);
+      border: 1px solid transparent;
+      font-size: 12px;
+      color: var(--ink-2);
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .chip .txt {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 180px;
+    }
+    .chip:hover { border-color: var(--green); color: var(--green-deep); }
+    .chip .rm {
+      color: var(--ink-3);
+      font-size: 14px;
+      line-height: 1;
+      padding: 0 2px;
+    }
+    .chip .rm:hover { color: var(--danger); }
+    .history .clear {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--ink-3);
+      background: none;
+      border: none;
+      cursor: pointer;
+    }
+    .history .clear:hover { color: var(--danger); }
+
+    /* 消息 */
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 36px;
+      transform: translateX(-50%) translateY(8px);
+      background: rgba(25, 25, 25, .92);
+      color: #fff;
+      font-size: 13px;
+      padding: 10px 18px;
+      border-radius: 999px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .2s, transform .2s;
+      z-index: 99;
+      max-width: 86vw;
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .toast.error { background: rgba(250, 81, 81, .95); }
+
+    /* 登录设置弹窗 */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+      padding: 16px;
+    }
+    .modal-backdrop[hidden] { display: none; }
+    .modal {
+      background: var(--card);
+      border-radius: var(--r-lg);
+      width: 100%;
+      max-width: 430px;
+      box-shadow: 0 8px 40px rgba(0, 0, 0, .18);
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px 0;
+    }
+    .modal-head h3 { font-size: 16px; font-weight: 700; }
+    .modal-head-actions { display: flex; align-items: center; gap: 12px; }
+    .modal-link {
+      font-size: 12.5px;
+      color: var(--green-deep);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .modal-link:hover { text-decoration: underline; }
+    .modal-close {
+      border: none;
+      background: none;
+      font-size: 22px;
+      line-height: 1;
+      color: var(--ink-3);
+      cursor: pointer;
+      padding: 4px;
+    }
+    .modal-close:hover { color: var(--ink); }
+    .modal-body {
+      padding: 14px 20px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .cookie-status {
+      font-size: 12.5px;
+      color: var(--ink-2);
+      background: var(--bg);
+      border-radius: var(--r-sm);
+      padding: 8px 12px;
+    }
+    .cookie-status.ok { color: var(--green-deep); background: var(--green-soft); }
+    .cookie-status.bad { color: var(--danger); background: #FDECEC; }
+    #cookieInput {
+      width: 100%;
+      min-height: 72px;
+      resize: vertical;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      line-height: 1.5;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      color: var(--ink);
+      background: var(--card);
+      outline: none;
+    }
+    #cookieInput:focus { border-color: var(--green); }
+    #authPassword {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      font-size: 14px;
+      color: var(--ink);
+      background: var(--card);
+      outline: none;
+    }
+    #authPassword:focus { border-color: var(--green); }
+    .modal-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn.danger-ghost { color: var(--danger); border-color: #F5C6C6; }
+    .btn.danger-ghost:hover { background: #FDECEC; color: var(--danger); border-color: var(--danger); }
+    .guide ol {
+      margin: 8px 0 0 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12.5px;
+      color: var(--ink-2);
+      line-height: 1.6;
+    }
+    .guide a { color: var(--green-deep); }
+    .guide code {
+      font-family: var(--mono);
+      background: var(--bg);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 11px;
+    }
+    .security-note { font-size: 11.5px; color: var(--ink-3); line-height: 1.6; }
+
+    /* 广告位 */
+    .quality-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .quality-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      cursor: pointer;
+      transition: all .15s;
+      font-size: 13px;
+    }
+    .quality-item:hover { border-color: var(--green); }
+    .quality-item.selected { border-color: var(--green); background: var(--green-soft); }
+    .quality-item input { accent-color: var(--green); }
+    .quality-item .q-label { font-weight: 600; }
+    .quality-item .q-size { margin-left: auto; color: var(--ink-2); font-size: 12px; }
+    .ad-slot {
+      max-width: 920px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+    .ad-slot[hidden] { display: none; }
+    .ad-slot .ad-inner {
+      background: var(--card);
+      border: 1px dashed var(--line);
+      border-radius: var(--r-md);
+      padding: 12px 16px;
+      text-align: center;
+      overflow: hidden;
+    }
+    .ad-slot .ad-inner img { max-width: 100%; height: auto; }
+    .ad-slot .ad-inner a { color: var(--green-deep); }
+
+    /* admin 面板扩展区 */
+    .admin-section { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .admin-section .ex-row { display: flex; gap: 8px; }
+    .admin-section .ex-row input {
+      flex: 1;
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      font-size: 12.5px;
+      color: var(--ink);
+      outline: none;
+    }
+    .admin-section .ex-row input:focus { border-color: var(--green); }
+    .admin-section .ex-row input.ex-url { flex: 2; }
+    .admin-section .ex-row input.ex-tag-input { flex: 0 0 100px; }
+    .admin-section input[type="password"] {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      font-size: 13px;
+      color: var(--ink);
+      outline: none;
+    }
+    .admin-section input[type="password"]:focus { border-color: var(--green); }
+    .ad-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+    .ad-row select {
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      font-size: 12.5px;
+      color: var(--ink);
+      background: var(--card);
+    }
+    #adHtml {
+      width: 100%;
+      min-height: 64px;
+      resize: vertical;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      line-height: 1.5;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      color: var(--ink);
+      outline: none;
+    }
+    #adHtml:focus { border-color: var(--green); }
+    @media (max-width: 760px) {
+      .admin-section .ex-row { flex-direction: column; gap: 6px; }
+    }
+    /* 用户界面隐藏项（代码保留，恢复时移除 hidden 即可） */
+    details.json[hidden], .history[hidden] { display: none; }
+
+    /* ============ 页脚 ============ */
+    .footer {
+      padding: 18px 24px 26px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--ink-3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .footer a {
+      color: var(--green-deep);
+      text-decoration: none;
+    }
+    .footer a:hover { text-decoration: underline; }
+    .footer .sep { color: var(--line); }
+
+    /* ============ 响应式 & 无障碍 ============ */
+    :focus-visible {
+      outline: 2px solid var(--green);
+      outline-offset: 2px;
+    }
+    @media (max-width: 760px) {
+      .stage {
+        flex-direction: column;
+        align-items: center;
+        padding: 0 16px 24px;
+      }
+      .canvas { width: min(340px, 100%); }
+      .panel { max-width: 340px; width: 100%; }
+      .topbar { padding: 14px 16px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .canvas.scanning .scan,
+      .status-pill .dot,
+      .empty .probe-ring { animation: none; }
+      .canvas.scanning .scan { opacity: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span id="brandName">视频号探针</span>
+    </div>
+    <span class="status-pill"><span class="dot" aria-hidden="true"></span>服务在线</span>
+  </header>
+
+  <div class="platform-tabs">
+    <button class="ptab active" data-platform="sph">视频号</button>
+    <button class="ptab" data-platform="yt" hidden>YouTube</button>
+  </div>
+  <div class="ad-slot" id="adTop" hidden></div>
+  <main class="stage">
+    <!-- 9:16 探针画布 -->
+    <section class="canvas" id="canvas" aria-label="视频预览">
+      <div class="scan" aria-hidden="true"></div>
+
+      <!-- 空状态：粘贴区 -->
+      <div class="empty" id="emptyState">
+        <div class="probe-ring" aria-hidden="true"></div>
+        <h2>粘贴视频号分享链接</h2>
+        <p>解析视频信息 · 获取下载地址</p>
+        <div class="input-row">
+          <input id="urlInput" type="text" placeholder="https://weixin.qq.com/sph/xxx" autocomplete="off" spellcheck="false">
+          <button id="fetchBtn" class="primary">解析</button>
+        </div>
+        <div class="examples" id="exampleList"></div>
+      </div>
+
+      <!-- 结果态：视频 / 封面 -->
+      <div id="resultMedia" hidden></div>
+
+      <div class="status-overlay" id="canvasStatus"></div>
+    </section>
+
+    <!-- 右侧信息面板 -->
+    <aside class="panel" id="ytPanel" hidden>
+      <div class="author" id="ytAuthorRow" hidden>
+        <span class="name" id="ytAuthorName"></span>
+        <span class="time" id="ytDuration"></span>
+      </div>
+      <div>
+        <div class="sec-label">标题</div>
+        <p class="desc" id="ytTitle"></p>
+      </div>
+      <div id="ytQualityBlock" hidden>
+        <div class="sec-label">选择清晰度</div>
+        <div class="quality-list" id="ytQualities"></div>
+      </div>
+      <div class="actions" id="ytActions" hidden>
+        <a class="btn primary" id="ytDownloadBtn" href="#" download>下载</a>
+      </div>
+      <div class="cookie-status bad" id="ytMaintenance" hidden>下载功能暂时停用（维护中），可先使用解析查看视频信息</div>
+      <div class="links" id="ytLinks" hidden></div>
+    </aside>
+
+    <aside class="panel" id="panel" hidden>
+      <div class="author" id="authorRow" hidden>
+        <img class="avatar" id="authorAvatar" alt="">
+        <span class="name" id="authorName"></span>
+        <img class="auth-icon" id="authorBadge" alt="认证" hidden>
+        <span class="time" id="publishTime"></span>
+      </div>
+
+      <div>
+        <div class="sec-label">描述</div>
+        <p class="desc" id="description"></p>
+      </div>
+
+      <div class="stats" id="statsRow" hidden></div>
+
+      <div id="qualityBlock" hidden>
+        <div class="sec-label">可选质量</div>
+        <div class="quality-tabs" id="qualityTabs"></div>
+      </div>
+
+      <div class="actions" id="actionsRow" hidden>
+        <button class="btn primary" id="downloadBtn">下载视频</button>
+        <button class="btn" id="copyBtn">复制直链</button>
+        <button class="btn" id="copyMinBtn">精简链接</button>
+      </div>
+
+      <div class="links" id="linksRow" hidden>
+        <div class="link-row"><span class="label">直链</span><code id="fullLink" title="点击复制"></code></div>
+        <div class="link-row"><span class="label">精简</span><code id="minLink" title="点击复制"></code></div>
+      </div>
+
+      <details class="json" hidden>
+        <summary>原始数据 JSON</summary>
+        <pre id="jsonView"></pre>
+      </details>
+
+      <div class="history" id="historyBlock" hidden>
+        <div class="sec-label">最近解析</div>
+        <div class="chips" id="historyChips"></div>
+        <button class="clear" id="historyClear">清空记录</button>
+      </div>
+    </aside>
+  </main>
+
+  <div class="ad-slot" id="adFooter" hidden></div>
+  <footer class="footer">
+    <span>仅供学习交流 · 请遵守平台规则</span>
+  </footer>
+
+  <!-- 管理员认证弹窗 -->
+  <div class="modal-backdrop" id="authModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <div class="modal-head">
+        <h3 id="authTitle">管理员认证</h3>
+        <button class="modal-close" id="authClose" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="security-note">此页面为管理员入口，请输入访问密码后继续。</p>
+        <input type="password" id="authPassword" placeholder="管理员密码" autocomplete="off" spellcheck="false">
+        <div class="modal-actions">
+          <button class="btn primary" id="authSubmit">进入</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 登录设置弹窗 -->
+  <div class="modal-backdrop" id="settingsModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="modal-head">
+        <h3 id="settingsTitle">登录设置</h3>
+        <div class="modal-head-actions">
+          <a class="modal-link" href="/stats">解析统计</a>
+          <button class="modal-close" id="settingsClose" aria-label="关闭">×</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="cookie-status" id="serverCookieStatus" hidden></div>
+        <div class="cookie-status" id="cookieStatus">未配置</div>
+        <textarea
+          id="cookieInput"
+          rows="4"
+          placeholder="粘贴 Cookie：可直接粘贴浏览器请求头（a=1; b=2; ...），或插件导出的 Netscape Cookie 文件内容（自动识别转换）"
+          spellcheck="false"></textarea>
+        <div class="modal-actions">
+          <button class="btn primary" id="cookieSave">保存并检查</button>
+          <button class="btn" id="cookieCheck">仅检查</button>
+          <button class="btn danger-ghost" id="cookieClear">清除</button>
+        </div>
+        <div class="guide">
+          <div class="sec-label">如何获取 Cookie</div>
+          <ol>
+            <li>打开 <a href="https://yuanbao.tencent.com/" target="_blank" rel="noopener">元宝网页版</a>，用微信扫码登录</li>
+            <li>方式一：按 <b>F12</b> 打开开发者工具 → <b>Network</b> → 刷新页面 → 点击任意请求 → 复制 <code>Cookie</code> 请求头的值
+            <li>方式二：用浏览器 Cookie 导出插件导出 Netscape 格式，把文件内容整个粘贴进来（自动识别，只保留元宝域的有效条目）</li>
+          </ol>
+        </div>
+        <div class="admin-section" id="examplesSection">
+          <div class="sec-label">示例链接管理（最多 3 条，展示在首页）</div>
+          <div id="exampleRows"></div>
+          <div class="modal-actions"><button class="btn" id="examplesSave">保存示例</button></div>
+        </div>
+        <div class="admin-section">
+          <div class="sec-label">广告位设置</div>
+          <label class="ad-row"><input type="checkbox" id="adEnabled"> 启用广告位</label>
+          <div class="ad-row">位置：
+            <select id="adPosition">
+              <option value="footer">页脚上方</option>
+              <option value="top">页面顶部</option>
+            </select>
+          </div>
+          <textarea id="adHtml" rows="3" placeholder="广告 HTML（图片 / iframe / 链接均可）"></textarea>
+          <div class="modal-actions"><button class="btn" id="adSave">保存广告</button></div>
+        </div>
+        <div class="admin-section">
+          <div class="sec-label">YouTube Cookie（yt-dlp 解析/下载使用）</div>
+          <div class="cookie-status" id="ytCookieStatus">未配置</div>
+          <textarea id="ytCookieInput" rows="3" placeholder="Netscape cookies.txt 内容（浏览器插件从 youtube.com 导出，建议用未登录/小号）"></textarea>
+          <div class="modal-actions">
+            <button class="btn primary" id="ytCookieSave">保存并检查</button>
+            <button class="btn" id="ytCookieCheck">仅检查</button>
+            <button class="btn danger-ghost" id="ytCookieClear">清除</button>
+          </div>
+        </div>
+        <div class="admin-section">
+          <div class="sec-label">修改管理员密码</div>
+          <input type="password" id="pwdCurrent" placeholder="当前密码" autocomplete="off">
+          <input type="password" id="pwdNew" placeholder="新密码（至少 6 位）" autocomplete="new-password">
+          <input type="password" id="pwdConfirm" placeholder="确认新密码" autocomplete="new-password">
+          <div class="modal-actions"><button class="btn" id="pwdSave">修改密码</button></div>
+        </div>
+        <p class="security-note">Cookie 仅保存在本浏览器（localStorage），随解析请求发送到本服务，不会上传到其他任何地方。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    /* ============ 站点配置（改这里做个性化） ============ */
+    const BRAND = "视频号探针";
+    const SLOGAN = "粘贴分享链接 · 解析视频信息";
+    const EXAMPLE_URL = "https://weixin.qq.com/sph/Axv548mzBF";
+    const API_BASE = "/api";            // 部署后保持同源即可
+    const HISTORY_KEY = "sph_history_v1";
+    const HISTORY_MAX = 12;
+    const COOKIE_KEY = "sph_cookie_v1";
+    const COOKIE_CHECK_KEY = "sph_cookie_check_v1";
+    const ADMIN_TOKEN_KEY = "sph_admin_token_v1";
+
+    /* ============ 元素引用 ============ */
+    const $ = (id) => document.getElementById(id);
+    const canvas = $("canvas");
+    const emptyState = $("emptyState");
+    const resultMedia = $("resultMedia");
+    const canvasStatus = $("canvasStatus");
+    const panel = $("panel");
+    const input = $("urlInput");
+    const fetchBtn = $("fetchBtn");
+    const jsonView = $("jsonView");
+    const toast = $("toast");
+
+    $("brandName").textContent = BRAND;
+    $("emptyState").querySelector("h2").textContent = "粘贴" + "视频号" + "分享链接";
+    $("emptyState").querySelector("p").textContent = SLOGAN;
+    document.title = BRAND + " · 链接解析";
+
+    /* ============ 状态 ============ */
+    let current = null;   // { feedInfo, authorInfo, raw, variants, activeIdx }
+    let platform = "sph"; // sph | yt
+    let ytState = null;   // { url, qualities, selected }
+
+    /* ============ 工具函数 ============ */
+    function esc(s) {
+      if (!s) return "";
+      const div = document.createElement("div");
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    function showToast(msg, isError) {
+      toast.textContent = msg;
+      toast.className = "toast show" + (isError ? " error" : "");
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => { toast.className = "toast"; }, 2400);
+    }
+
+    function fmtTime(unixSec) {
+      if (!unixSec) return "";
+      const d = new Date(Number(unixSec) * 1000);
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
+
+    function sanitizeFilename(desc, createtime) {
+      if (desc) return desc.replace(/[\\/:*?"<>|]/g, "").trim().slice(0, 200) + ".mp4";
+      if (createtime) {
+        const d = new Date(Number(createtime) * 1000);
+        const pad = (n) => String(n).padStart(2, "0");
+        return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.mp4`;
+      }
+      return "";
+    }
+
+    /* 精简链接：只保留 encfilekey + token，去掉其余追踪参数 */
+    function minimizeUrl(url) {
+      try {
+        const u = new URL(decodeURIComponent(url));
+        const filekey = u.searchParams.get("encfilekey");
+        const token = u.searchParams.get("token");
+        if (filekey && token) {
+          const n = new URL(u.origin + u.pathname);
+          n.searchParams.set("encfilekey", filekey);
+          n.searchParams.set("token", token);
+          return n.toString();
+        }
+      } catch (e) { /* 保持原样 */ }
+      return url;
+    }
+
+    function setCanvasStatus(msg, isError) {
+      canvasStatus.textContent = msg || "";
+      canvasStatus.className = "status-overlay" + (isError ? " error" : "");
+      canvasStatus.style.display = msg ? "block" : "none";
+    }
+
+    /* ============ 解析请求 ============ */
+    async function doFetch(url) {
+      if (platform === "yt") return doFetchYt(url);
+      const target = (url || input.value.trim()).trim();
+      if (!target) { showToast("请先粘贴分享链接", true); input.focus(); return; }
+      if (!/^https?:\/\//i.test(target)) { showToast("链接格式不正确", true); return; }
+
+      fetchBtn.disabled = true;
+      canvas.classList.add("scanning");
+      resultMedia.replaceChildren();
+      resultMedia.hidden = true;
+      panel.hidden = true;
+      setCanvasStatus("解析中…");
+
+      try {
+        const resp = await fetch(`${API_BASE}/fetch_video_profile`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: target, cookie: getSavedCookie() }),
+        });
+        let data = null;
+        try { data = await resp.json(); } catch (e) { /* 非 JSON */ }
+        if (!resp.ok || !data) throw new Error((data && data.error) || `请求失败（HTTP ${resp.status}）`);
+        if (data.errCode && data.errCode !== 0) {
+          throw new Error(`接口返回错误：${data.errMsg || data.errCode}`);
+        }
+        renderResult(data, target);
+        saveHistory(target);
+        setCanvasStatus("");
+      } catch (err) {
+        let msg = err.message;
+        if (/http 401/.test(msg)) {
+          msg += "（Cookie 可能已过期，可点击右上角「登录设置」检查）";
+        }
+        setCanvasStatus("解析失败", true);
+        showToast(msg, true);
+        renderError(msg);
+      } finally {
+        fetchBtn.disabled = false;
+        canvas.classList.remove("scanning");
+      }
+    }
+
+    /* ============ 渲染 ============ */
+    function renderError(msg) {
+      panel.hidden = false;
+      $("authorRow").hidden = true;
+      $("description").textContent = "解析失败：" + msg;
+      $("statsRow").hidden = true;
+      $("qualityBlock").hidden = true;
+      $("actionsRow").hidden = true;
+      $("linksRow").hidden = true;
+      jsonView.textContent = JSON.stringify({ error: msg }, null, 2);
+    }
+
+    function renderResult(data, queryUrl) {
+      const fi = (data.data && data.data.feedInfo) || {};
+      const ai = (data.data && data.data.authorInfo) || {};
+      current = { fi, ai, raw: data, queryUrl };
+
+      /* 候选视频源：H.264 / H.265 / 兜底 */
+      const variants = [];
+      if (fi.h264VideoInfo && fi.h264VideoInfo.videoUrl) variants.push({ label: "H.264", url: fi.h264VideoInfo.videoUrl });
+      if (fi.h265VideoInfo && fi.h265VideoInfo.videoUrl) variants.push({ label: "H.265", url: fi.h265VideoInfo.videoUrl });
+      if (fi.videoUrl && !variants.some((v) => v.url === fi.videoUrl)) variants.push({ label: "默认", url: fi.videoUrl });
+      current.variants = variants;
+      current.activeIdx = 0;
+
+      renderMedia(fi);
+      renderAuthor(ai, fi);
+      $("description").textContent = fi.description || "（无描述）";
+      renderStats(fi);
+      renderQualityTabs();
+      renderActions();
+      renderLinks();
+      jsonView.textContent = JSON.stringify(data, null, 2);
+      panel.hidden = false;
+    }
+
+    function renderMedia(fi) {
+      const url = current.variants.length ? current.variants[current.activeIdx].url : "";
+      resultMedia.replaceChildren();
+      if (url) {
+        const video = document.createElement("video");
+        video.src = url;
+        if (fi.coverUrl) video.poster = fi.coverUrl;
+        video.controls = true;
+        video.preload = "metadata";
+        resultMedia.appendChild(video);
+      } else if (fi.coverUrl) {
+        const img = document.createElement("img");
+        img.className = "cover";
+        img.src = fi.coverUrl;
+        img.alt = "封面";
+        img.onerror = () => img.remove();
+        resultMedia.appendChild(img);
+      } else {
+        const tip = document.createElement("div");
+        tip.className = "empty";
+        tip.style.cssText = "z-index:1;color:#fff;font-size:13px;";
+        tip.textContent = "未找到可播放的视频地址";
+        resultMedia.appendChild(tip);
+      }
+      resultMedia.hidden = false;
+      emptyState.style.display = "none";
+    }
+
+    function renderAuthor(ai, fi) {
+      const row = $("authorRow");
+      const hasAuthor = ai && (ai.nickname || ai.headImgUrl);
+      row.hidden = !hasAuthor && !fi.createtime;
+      if (hasAuthor) {
+        $("authorName").textContent = ai.nickname || "未知作者";
+        if (ai.headImgUrl) {
+          $("authorAvatar").src = ai.headImgUrl;
+          $("authorAvatar").onerror = () => { $("authorAvatar").style.visibility = "hidden"; };
+        } else {
+          $("authorAvatar").style.visibility = "hidden";
+        }
+        if (ai.authIconUrl) {
+          $("authorBadge").src = ai.authIconUrl;
+          $("authorBadge").hidden = false;
+        } else {
+          $("authorBadge").hidden = true;
+        }
+      } else {
+        $("authorName").textContent = "";
+        $("authorAvatar").style.visibility = "hidden";
+        $("authorBadge").hidden = true;
+      }
+      $("publishTime").textContent = fmtTime(fi.createtime);
+    }
+
+    function renderStats(fi) {
+      const row = $("statsRow");
+      const items = [
+        ["赞", fi.likeCountFmt],
+        ["爱心", fi.favCountFmt],
+        ["转发", fi.forwardCountFmt],
+        ["评论", fi.commentCountFmt],
+      ].filter(([, v]) => v);
+      row.replaceChildren();
+      for (const [label, val] of items) {
+        const span = document.createElement("span");
+        span.className = "stat";
+        span.textContent = `${label} ${val}`;
+        row.appendChild(span);
+      }
+      row.hidden = items.length === 0;
+    }
+
+    function renderQualityTabs() {
+      const block = $("qualityBlock");
+      const tabs = $("qualityTabs");
+      tabs.replaceChildren();
+      if (!current.variants.length) { block.hidden = true; return; }
+      current.variants.forEach((v, i) => {
+        const btn = document.createElement("button");
+        btn.className = "quality-tab" + (i === current.activeIdx ? " active" : "");
+        btn.textContent = v.label;
+        btn.addEventListener("click", () => selectVariant(i));
+        tabs.appendChild(btn);
+      });
+      block.hidden = false;
+    }
+
+    function selectVariant(idx) {
+      current.activeIdx = idx;
+      renderQualityTabs();
+      renderMedia(current.fi);
+      renderLinks();
+    }
+
+    function renderActions() {
+      $("actionsRow").hidden = !current.variants.length;
+    }
+
+    function renderLinks() {
+      const has = current.variants.length > 0;
+      $("linksRow").hidden = !has;
+      if (!has) return;
+      const url = current.variants[current.activeIdx].url;
+      $("fullLink").textContent = url;
+      $("fullLink").onclick = () => copyText(url, "直链已复制");
+      const min = minimizeUrl(url);
+      $("minLink").textContent = min;
+      $("minLink").onclick = () => copyText(min, "精简链接已复制");
+    }
+
+    /* ============ 操作 ============ */
+    async function copyText(text, tip) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(tip || "已复制");
+      } catch (e) {
+        /* 剪贴板不可用（非 https / 旧浏览器）时降级 */
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); showToast(tip || "已复制"); }
+        catch (e2) { showToast("复制失败，请手动选择链接", true); }
+        ta.remove();
+      }
+    }
+
+    /* 下载：先尝试 blob 直存，跨域受限时退化为新标签页打开 */
+    async function downloadVideo() {
+      if (!current || !current.variants.length) return;
+      const url = current.variants[current.activeIdx].url;
+      const { fi } = current;
+      const filename = sanitizeFilename(fi.description, fi.createtime) || "video.mp4";
+      showToast("准备下载…");
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = blobUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 3000);
+        showToast("下载已开始");
+      } catch (err) {
+        showToast("直接下载受限，已在新标签页打开", false);
+        window.open(url, "_blank", "noopener");
+      }
+    }
+
+    /* ============ 历史记录 ============ */
+    function getHistory() {
+      try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"); }
+      catch (e) { return []; }
+    }
+    function saveHistory(url) {
+      const list = getHistory().filter((h) => h.url !== url);
+      list.unshift({ url, ts: Date.now() });
+      if (list.length > HISTORY_MAX) list.length = HISTORY_MAX;
+      try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list)); } catch (e) { /* 隐私模式等 */ }
+      renderHistory();
+    }
+    function renderHistory() {
+      const chips = $("historyChips");
+      const list = getHistory();
+      chips.replaceChildren();
+      $("historyClear").style.display = list.length ? "" : "none";
+      for (const h of list) {
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        const txt = document.createElement("span");
+        txt.className = "txt";
+        txt.textContent = h.url;
+        txt.title = h.url;
+        txt.addEventListener("click", () => { input.value = h.url; doFetch(h.url); });
+        const rm = document.createElement("span");
+        rm.className = "rm";
+        rm.textContent = "×";
+        rm.title = "移除";
+        rm.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const next = getHistory().filter((x) => x.url !== h.url);
+          try { localStorage.setItem(HISTORY_KEY, JSON.stringify(next)); } catch (e) { /* ignore */ }
+          renderHistory();
+        });
+        chip.append(txt, rm);
+        chips.appendChild(chip);
+      }
+    }
+
+    /* ============ 登录设置（Cookie 管理） ============ */
+    function domainMatches(d, host) {
+      if (d.startsWith(".")) return host === d.slice(1) || host.endsWith(d);
+      return host === d;
+    }
+    /* 归一化粘贴的 cookie：识别 Netscape 文件格式并转换为 Cookie 请求头 */
+    function normalizeCookieInput(raw) {
+      const text = String(raw || "").trim();
+      const isNetscape = text.split(/\r?\n/).some((line) => {
+        const l = line.trim();
+        if (!l || l.startsWith("#")) return false;
+        return l.split(/\s+/).length >= 6 && /^(#HttpOnly_)?\.?[^\s]+\s+(TRUE|FALSE)\s+/.test(l);
+      });
+      if (!isNetscape) return { value: text, netscape: false, kept: 0, dropped: 0 };
+      const host = "yuanbao.tencent.com";
+      const now = Date.now() / 1000;
+      const map = {};
+      let kept = 0, dropped = 0;
+      for (const line of text.split(/\r?\n/)) {
+        const l = line.trim();
+        if (!l || l.startsWith("#")) continue;
+        const parts = l.split(/\s+/);
+        if (parts.length < 6) { dropped++; continue; }
+        const domain = parts[0].replace(/^#HttpOnly_/, "");
+        const expires = Number(parts[4] || 0);
+        const name = parts[5];
+        const value = parts.slice(6).join(" ");
+        if (expires && expires < now) { dropped++; continue; }
+        if (!domainMatches(domain, host)) { dropped++; continue; }
+        map[name] = value;
+        kept++;
+      }
+      const out = Object.entries(map)
+        .map(([k, v]) => `${k}=${v}`)
+        .join("; ");
+      return { value: out, netscape: true, kept, dropped };
+    }
+    function getSavedCookie() {
+      try { return localStorage.getItem(COOKIE_KEY) || ""; } catch (e) { return ""; }
+    }
+    function saveCookie(c) {
+      try { localStorage.setItem(COOKIE_KEY, c); } catch (e) { /* 隐私模式等 */ }
+      renderCookieStatus();
+    }
+    function clearCookie() {
+      try {
+        localStorage.removeItem(COOKIE_KEY);
+        localStorage.removeItem(COOKIE_CHECK_KEY);
+      } catch (e) { /* ignore */ }
+      $("cookieInput").value = "";
+      renderCookieStatus();
+    }
+    function renderCookieStatus() {
+      const el = $("cookieStatus");
+      const cookie = getSavedCookie();
+      if (!cookie) {
+        el.textContent = "未配置 Cookie —— 解析将使用服务端默认配置";
+        el.className = "cookie-status";
+        return;
+      }
+      let check = null;
+      try { check = JSON.parse(localStorage.getItem(COOKIE_CHECK_KEY) || "null"); } catch (e) { /* ignore */ }
+      if (!check) {
+        el.textContent = "已配置 Cookie（尚未检查有效期）";
+        el.className = "cookie-status ok";
+        return;
+      }
+      const when = new Date(check.at).toLocaleString();
+      el.textContent = check.ok
+        ? `Cookie 有效（${when} 检查通过）`
+        : `Cookie 检查未通过（${when}）：${check.message}`;
+      el.className = "cookie-status " + (check.ok ? "ok" : "bad");
+    }
+    async function checkCookie(showToastMsg) {
+      const cookie = getSavedCookie();
+      try {
+        const resp = await fetch(`${API_BASE}/check_cookie`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cookie }),
+        });
+        const data = await resp.json();
+        const check = { ok: !!data.valid, at: Date.now(), message: data.message || "" };
+        try { localStorage.setItem(COOKIE_CHECK_KEY, JSON.stringify(check)); } catch (e) { /* ignore */ }
+        renderCookieStatus();
+        if (showToastMsg) {
+          showToast(data.valid ? "Cookie 有效，可以开始解析" : (data.message || "Cookie 无效"), !data.valid);
+        }
+        return !!data.valid;
+      } catch (err) {
+        showToast("检查失败：" + err.message, true);
+        return false;
+      }
+    }
+    function openSettings() {
+      $("cookieInput").value = getSavedCookie();
+      renderCookieStatus();
+      refreshServerCookieStatus();
+      loadAdminExamples();
+      loadAdminAd();
+      loadAdminYtCookie();
+      $("settingsModal").hidden = false;
+      $("cookieInput").focus();
+    }
+    function closeSettings() { $("settingsModal").hidden = true; }
+
+    /* ============ 管理员认证（/admin 入口） ============ */
+    const isAdminPage = location.pathname.replace(/\/+$/, "") === "/admin";
+    let adminMode = false;
+
+    function getAdminToken() {
+      try { return sessionStorage.getItem(ADMIN_TOKEN_KEY) || ""; } catch (e) { return ""; }
+    }
+    function setAdminToken(t) {
+      try { sessionStorage.setItem(ADMIN_TOKEN_KEY, t); } catch (e) { /* ignore */ }
+    }
+    function clearAdminToken() {
+      try { sessionStorage.removeItem(ADMIN_TOKEN_KEY); } catch (e) { /* ignore */ }
+    }
+    function showAuthModal() {
+      $("authPassword").value = "";
+      $("authModal").hidden = false;
+      $("authPassword").focus();
+    }
+    function hideAuthModal() { $("authModal").hidden = true; }
+
+    async function adminFetch(path, options) {
+      const resp = await fetch(`${API_BASE}${path}`, {
+        ...(options || {}),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + getAdminToken(),
+          ...((options && options.headers) || {}),
+        },
+      });
+      return resp;
+    }
+
+    async function refreshServerCookieStatus() {
+      const el = $("serverCookieStatus");
+      if (!adminMode) { el.hidden = true; return; }
+      el.hidden = false;
+      try {
+        const resp = await adminFetch("/admin_cookie");
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          el.textContent = "认证已过期，请重新登录";
+          el.className = "cookie-status bad";
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return;
+        }
+        el.textContent = data.kv === false
+          ? "未绑定 KV —— 保存仅对本浏览器生效"
+          : (data.configured ? "全站 Cookie：已配置（所有访客生效）" : "全站 Cookie：未配置（使用部署时的默认值）");
+        el.className = "cookie-status ok";
+      } catch (e) {
+        el.textContent = "全站状态获取失败";
+        el.className = "cookie-status bad";
+      }
+    }
+
+    /* 保存到服务端（全站生效）。返回提示文案 */
+    async function saveServerCookie(cookie) {
+      try {
+        const resp = await adminFetch("/admin_cookie", {
+          method: "POST",
+          body: JSON.stringify({ cookie }),
+        });
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return "（认证已过期，请重新登录）";
+        }
+        if (data.ok && data.persisted) {
+          await refreshServerCookieStatus();
+          return "全站 Cookie 已更新。";
+        }
+        if (data.reason === "no_kv") return "（未绑定 KV，仅本浏览器生效）";
+        return "";
+      } catch (e) {
+        return "";
+      }
+    }
+
+    /* /admin 入口流程：有效 token 直接进入，否则弹密码框 */
+    async function initAdminFlow() {
+      if (getAdminToken()) {
+        try {
+          const resp = await adminFetch("/admin_cookie");
+          const data = await resp.json();
+          if (resp.status !== 401 && data && data.ok) {
+            adminMode = true;
+            openSettings();
+            return;
+          }
+        } catch (e) { /* 落入密码框 */ }
+        clearAdminToken();
+      }
+      showAuthModal();
+    }
+
+    /* ============ YouTube ============ */
+    async function doFetchYt(url) {
+      const target = (url || input.value.trim()).trim();
+      if (!target) { showToast("请先粘贴 YouTube 链接", true); input.focus(); return; }
+      if (!/^https?:\/\//i.test(target)) { showToast("链接格式不正确", true); return; }
+      fetchBtn.disabled = true;
+      canvas.classList.add("scanning");
+      $("ytPanel").hidden = true;
+      $("panel").hidden = true;
+      setCanvasStatus("解析中…");
+      try {
+        const resp = await fetch(`${API_BASE}/youtube/info?url=${encodeURIComponent(target)}`);
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
+        renderYt(data, target);
+        setCanvasStatus("");
+        saveHistory(target);
+      } catch (err) {
+        let msg = err.message;
+        if (/cookie|bot|Sign in/i.test(msg)) msg += "（可能需要管理员更新 YouTube Cookie）";
+        setCanvasStatus("解析失败", true);
+        showToast(msg, true);
+      } finally {
+        fetchBtn.disabled = false;
+        canvas.classList.remove("scanning");
+      }
+    }
+
+    function fmtDuration(sec) {
+      if (!sec) return "";
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      const pad = (n) => String(n).padStart(2, "0");
+      return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    }
+    function fmtSize(bytes) {
+      if (!bytes) return "";
+      if (bytes > 1073741824) return (bytes / 1073741824).toFixed(1) + " GB";
+      if (bytes > 1048576) return (bytes / 1048576).toFixed(0) + " MB";
+      return (bytes / 1024).toFixed(0) + " KB";
+    }
+
+    function renderYt(data, url) {
+      ytState = { url, qualities: data.qualities || [], selected: null };
+      $("ytAuthorName").textContent = data.uploader || "未知作者";
+      $("ytAuthorRow").hidden = !data.uploader && !data.duration;
+      $("ytDuration").textContent = fmtDuration(data.duration);
+      $("ytTitle").textContent = data.title || "（无标题）";
+      // 清晰度列表
+      const ql = $("ytQualities");
+      ql.replaceChildren();
+      const list = ytState.qualities.length ? ytState.qualities : [{ quality: "best", label: "最高画质", sizeBytes: 0 }];
+      list.forEach((q, i) => {
+        const item = document.createElement("label");
+        item.className = "quality-item" + (i === 0 ? " selected" : "");
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "ytQuality";
+        radio.checked = i === 0;
+        radio.value = q.quality;
+        radio.addEventListener("change", () => {
+          document.querySelectorAll(".quality-item").forEach((x) => x.classList.remove("selected"));
+          item.classList.add("selected");
+          ytState.selected = q.quality;
+          updateYtDownload();
+        });
+        const label = document.createElement("span");
+        label.className = "q-label";
+        label.textContent = q.label;
+        const size = document.createElement("span");
+        size.className = "q-size";
+        size.textContent = q.sizeBytes ? fmtSize(q.sizeBytes) : "";
+        item.append(radio, label, size);
+        ql.appendChild(item);
+      });
+      ytState.selected = list[0].quality;
+      $("ytQualityBlock").hidden = false;
+      if (data.downloadEnabled === false) {
+        $("ytActions").hidden = true;
+        $("ytMaintenance").hidden = false;
+      } else {
+        $("ytActions").hidden = false;
+        $("ytMaintenance").hidden = true;
+        updateYtDownload();
+      }
+      $("ytLinks").hidden = true;
+      $("ytPanel").hidden = false;
+      // 隐藏视频号结果
+      resultMedia.replaceChildren();
+      resultMedia.hidden = true;
+      $("panel").hidden = true;
+      emptyState.style.display = "none";
+    }
+
+    function updateYtDownload() {
+      if (!ytState || !ytState.selected) return;
+      const url = encodeURIComponent(ytState.url);
+      $("ytDownloadBtn").href = `${API_BASE}/youtube/download?url=${url}&quality=${encodeURIComponent(ytState.selected)}`;
+    }
+
+    /* ============ 示例链接 & 广告位（公共） ============ */
+    async function loadExamples() {
+      try {
+        const resp = await fetch(`${API_BASE}/examples`);
+        const data = await resp.json();
+        if (data && Array.isArray(data.list) && data.list.length) {
+          renderExamples(data.list);
+          return;
+        }
+      } catch (e) { /* 落入默认 */ }
+      renderExamples([{ title: "试试示例视频", url: EXAMPLE_URL }]);
+    }
+    function renderExamples(list) {
+      const el = $("exampleList");
+      el.replaceChildren();
+      for (const item of list.slice(0, 3)) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "ex-chip";
+        const titleRow = document.createElement("span");
+        titleRow.className = "ex-title";
+        const title = document.createElement("span");
+        title.textContent = item.title || item.url;
+        titleRow.appendChild(title);
+        if (item.tag) {
+          const tag = document.createElement("span");
+          tag.className = "ex-tag";
+          tag.textContent = item.tag;
+          titleRow.appendChild(tag);
+        }
+        const url = document.createElement("span");
+        url.textContent = item.url;
+        chip.append(titleRow, url);
+        chip.addEventListener("click", () => {
+          input.value = item.url;
+          doFetch(item.url);
+        });
+        el.appendChild(chip);
+      }
+    }
+    async function loadAd() {
+      try {
+        const resp = await fetch(`${API_BASE}/ad`);
+        const data = await resp.json();
+        if (data && data.enabled && data.html) renderAd(data.position, data.html);
+      } catch (e) { /* 无广告 */ }
+    }
+    function renderAd(position, html) {
+      const slot = position === "top" ? $("adTop") : $("adFooter");
+      slot.replaceChildren();
+      const inner = document.createElement("div");
+      inner.className = "ad-inner";
+      inner.innerHTML = html; // 广告 HTML 由管理员配置，属可信内容
+      slot.appendChild(inner);
+      slot.hidden = false;
+    }
+
+    /* ============ 示例链接 & 广告位（admin 管理） ============ */
+    async function loadAdminExamples() {
+      const rows = $("exampleRows");
+      rows.replaceChildren();
+      let list = [];
+      try {
+        const resp = await adminFetch("/admin/examples");
+        const data = await resp.json();
+        if (data && data.ok && Array.isArray(data.list)) list = data.list;
+      } catch (e) { /* 留空 */ }
+      for (let i = 0; i < 3; i++) {
+        const row = document.createElement("div");
+        row.className = "ex-row";
+        const title = document.createElement("input");
+        title.type = "text";
+        title.placeholder = "标题";
+        title.value = (list[i] && list[i].title) || "";
+        title.dataset.idx = String(i);
+        const tag = document.createElement("input");
+        tag.type = "text";
+        tag.className = "ex-tag-input";
+        tag.placeholder = "标签（如：精选）";
+        tag.value = (list[i] && list[i].tag) || "";
+        tag.dataset.idx = String(i);
+        const url = document.createElement("input");
+        url.type = "text";
+        url.className = "ex-url";
+        url.placeholder = "https://weixin.qq.com/sph/xxx";
+        url.value = (list[i] && list[i].url) || "";
+        url.dataset.idx = String(i);
+        row.append(title, tag, url);
+        rows.appendChild(row);
+      }
+    }
+    async function saveExamples() {
+      const rows = [...$("exampleRows").querySelectorAll(".ex-row")];
+      const list = rows.map((r) => {
+        const inputs = r.querySelectorAll("input");
+        return { title: inputs[0].value.trim(), tag: inputs[1].value.trim(), url: inputs[2].value.trim() };
+      }).filter((x) => x.url);
+      if (list.length > 3) { showToast("最多 3 条示例链接", true); return; }
+      try {
+        const resp = await adminFetch("/admin/examples", {
+          method: "POST",
+          body: JSON.stringify({ list }),
+        });
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return;
+        }
+        if (data.ok) {
+          showToast(`示例链接已保存（${list.length} 条）`);
+          loadExamples();
+        } else {
+          showToast(data.message || "保存失败", true);
+        }
+      } catch (e) {
+        showToast("保存失败：" + e.message, true);
+      }
+    }
+    async function loadAdminAd() {
+      try {
+        const resp = await adminFetch("/admin/ad");
+        const data = await resp.json();
+        if (data && data.ok) {
+          $("adEnabled").checked = !!data.enabled;
+          $("adPosition").value = data.position === "top" ? "top" : "footer";
+          $("adHtml").value = data.html || "";
+        }
+      } catch (e) { /* 留默认 */ }
+    }
+    async function saveAd() {
+      const cfg = {
+        enabled: $("adEnabled").checked,
+        position: $("adPosition").value,
+        html: $("adHtml").value.trim(),
+      };
+      try {
+        const resp = await adminFetch("/admin/ad", {
+          method: "POST",
+          body: JSON.stringify(cfg),
+        });
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return;
+        }
+        if (data.ok) {
+          showToast(cfg.enabled ? "广告已启用并保存" : "广告已保存（未启用）");
+          $("adTop").hidden = true;
+          $("adFooter").hidden = true;
+          loadAd();
+        } else {
+          showToast(data.message || "保存失败", true);
+        }
+      } catch (e) {
+        showToast("保存失败：" + e.message, true);
+      }
+    }
+
+    /* ============ 事件绑定 ============ */
+    document.querySelectorAll(".ptab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        platform = btn.dataset.platform;
+        document.querySelectorAll(".ptab").forEach((b) => b.classList.toggle("active", b === btn));
+        input.value = "";
+        input.placeholder = platform === "yt"
+          ? "https://www.youtube.com/watch?v=xxx 或 youtu.be/xxx"
+          : "https://weixin.qq.com/sph/xxx";
+        $("ytPanel").hidden = true;
+        $("panel").hidden = true;
+        resultMedia.replaceChildren();
+        resultMedia.hidden = true;
+        emptyState.style.display = "";
+        setCanvasStatus("");
+        input.focus();
+      });
+    });
+    fetchBtn.addEventListener("click", () => doFetch());
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") doFetch(); });
+    $("downloadBtn").addEventListener("click", downloadVideo);
+    $("copyBtn").addEventListener("click", () => {
+      if (current && current.variants.length) copyText(current.variants[current.activeIdx].url, "直链已复制");
+    });
+    $("copyMinBtn").addEventListener("click", () => {
+      if (current && current.variants.length) copyText(minimizeUrl(current.variants[current.activeIdx].url), "精简链接已复制");
+    });
+    $("historyClear").addEventListener("click", () => {
+      try { localStorage.removeItem(HISTORY_KEY); } catch (e) { /* ignore */ }
+      renderHistory();
+    });
+
+    /* 登录设置弹窗 */
+    $("settingsClose").addEventListener("click", closeSettings);
+    $("settingsModal").addEventListener("click", (e) => {
+      if (e.target === $("settingsModal")) closeSettings();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        if (!$("authModal").hidden) hideAuthModal();
+        else if (!$("settingsModal").hidden) closeSettings();
+      }
+    });
+    $("cookieSave").addEventListener("click", async () => {
+      const res = normalizeCookieInput($("cookieInput").value);
+      if (res.netscape) $("cookieInput").value = res.value; // 回显转换后的请求头格式
+      saveCookie(res.value);
+      const prefix = res.netscape
+        ? `已识别 Netscape 格式（保留 ${res.kept} 条，过滤 ${res.dropped} 条）。`
+        : "";
+      let adminNote = "";
+      if (adminMode) adminNote = await saveServerCookie(res.value);
+      const ok = await checkCookie(false);
+      if (ok) {
+        closeSettings();
+        showToast(prefix + adminNote + "登录成功，可以开始解析了");
+      } else {
+        showToast(prefix + adminNote + "检查未通过，详情见状态栏", true);
+      }
+    });
+    $("cookieCheck").addEventListener("click", () => checkCookie(true));
+    $("cookieClear").addEventListener("click", () => {
+      clearCookie();
+      showToast("已清除 Cookie");
+    });
+
+    /* 管理员认证弹窗 */
+    $("authClose").addEventListener("click", hideAuthModal);
+    $("authModal").addEventListener("click", (e) => {
+      if (e.target === $("authModal")) hideAuthModal();
+    });
+    $("authSubmit").addEventListener("click", async () => {
+      const password = $("authPassword").value.trim();
+      if (!password) { showToast("请输入密码", true); return; }
+      try {
+        const resp = await fetch(`${API_BASE}/admin_auth`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        const data = await resp.json();
+        if (data.ok && data.token) {
+          setAdminToken(data.token);
+          adminMode = true;
+          hideAuthModal();
+          openSettings();
+        } else {
+          showToast(data.message || "认证失败", true);
+        }
+      } catch (err) {
+        showToast("认证失败：" + err.message, true);
+      }
+    });
+    $("authPassword").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") $("authSubmit").click();
+    });
+
+    /* 示例链接 & 广告位 */
+    $("examplesSave").addEventListener("click", saveExamples);
+    $("adSave").addEventListener("click", saveAd);
+
+    /* YouTube Cookie 管理 */
+    async function loadAdminYtCookie() {
+      try {
+        const resp = await adminFetch("/admin/youtube_cookie");
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return;
+        }
+        const el = $("ytCookieStatus");
+        if (data.ok) {
+          el.textContent = data.configured ? `已配置（${data.length} 字符）` : "未配置 —— YouTube 解析将失败（bot 拦截）";
+          el.className = "cookie-status" + (data.configured ? " ok" : "");
+        }
+      } catch (e) { /* 保持默认 */ }
+    }
+    async function checkYtCookie(showToastMsg) {
+      try {
+        const resp = await adminFetch("/admin/youtube_cookie_check", { method: "POST", body: "{}" });
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return false;
+        }
+        if (showToastMsg) {
+          if (data.valid) {
+            showToast(`Cookie 有效：${data.title || "解析成功"}`);
+          } else {
+            showToast((data.message || "Cookie 无效").slice(0, 80), true);
+          }
+        }
+        loadAdminYtCookie();
+        return !!data.valid;
+      } catch (e) {
+        showToast("检查失败：" + e.message, true);
+        return false;
+      }
+    }
+    $("ytCookieSave").addEventListener("click", async () => {
+      const cookie = $("ytCookieInput").value.trim();
+      if (!cookie) { showToast("请先粘贴 cookies.txt 内容", true); return; }
+      try {
+        const resp = await adminFetch("/admin/youtube_cookie", {
+          method: "POST",
+          body: JSON.stringify({ cookie }),
+        });
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return;
+        }
+        if (data.ok) {
+          $("ytCookieInput").value = "";
+          const ok = await checkYtCookie(false);
+          if (ok) {
+            showToast("YouTube Cookie 已保存并验证有效");
+          } else {
+            showToast("已保存，但检查未通过（详情见状态栏）", true);
+          }
+        } else {
+          showToast(data.message || "保存失败", true);
+        }
+      } catch (e) {
+        showToast("保存失败：" + e.message, true);
+      }
+    });
+    $("ytCookieCheck").addEventListener("click", () => checkYtCookie(true));
+    $("ytCookieClear").addEventListener("click", async () => {
+      try {
+        const resp = await adminFetch("/admin/youtube_cookie", {
+          method: "POST",
+          body: JSON.stringify({ cookie: "" }),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+          showToast("YouTube Cookie 已清除");
+          loadAdminYtCookie();
+        } else {
+          showToast(data.message || "清除失败", true);
+        }
+      } catch (e) {
+        showToast("清除失败：" + e.message, true);
+      }
+    });
+
+    /* 修改管理员密码 */
+    $("pwdSave").addEventListener("click", async () => {
+      const current = $("pwdCurrent").value.trim();
+      const next = $("pwdNew").value.trim();
+      const confirm = $("pwdConfirm").value.trim();
+      if (!current) { showToast("请输入当前密码", true); return; }
+      if (next.length < 6) { showToast("新密码至少 6 位", true); return; }
+      if (next !== confirm) { showToast("两次输入的新密码不一致", true); return; }
+      try {
+        const resp = await adminFetch("/admin/change_password", {
+          method: "POST",
+          body: JSON.stringify({ current, next }),
+        });
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return;
+        }
+        if (data.ok) {
+          showToast("密码已修改，请使用新密码重新登录");
+          $("pwdCurrent").value = $("pwdNew").value = $("pwdConfirm").value = "";
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+        } else {
+          showToast(data.message || "修改失败", true);
+        }
+      } catch (e) {
+        showToast("修改失败：" + e.message, true);
+      }
+    });
+
+    renderHistory();
+    renderCookieStatus();
+    loadExamples();
+    loadAd();
+    if (isAdminPage) initAdminFlow();
+  </script>
+</body>
+</html>
