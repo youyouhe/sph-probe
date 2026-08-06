@@ -61,6 +61,12 @@ if ! command -v nginx >/dev/null 2>&1; then
   apt-get install -y nginx
 fi
 
+# --- ffmpeg（ASR 抽取音频 / yt-dlp 合并音视频流） ---
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "--> 安装 ffmpeg ..."
+  apt-get install -y ffmpeg
+fi
+
 # --- 部署目录与用户 ---
 id -u sph >/dev/null 2>&1 || useradd -r -m -d "$REMOTE_DIR" sph
 mkdir -p "$REMOTE_DIR/data"
@@ -76,6 +82,7 @@ if [ ! -f "$REMOTE_DIR/.env" ]; then
 SPH_ADMIN_PASSWORD=$ADMIN_PASS
 SPH_DB=$REMOTE_DIR/data/sph.db
 SPH_KV=$REMOTE_DIR/data/kv.json
+# SILICONFLOW_API_KEY=sk-xxx   # 可选：ASR 转文字（也可部署后在 /admin 在线配置）
 ENV
   echo "ADMIN_PASSWORD=$ADMIN_PASS" > "$REMOTE_DIR/.admin_password"
   chmod 600 "$REMOTE_DIR/.admin_password"

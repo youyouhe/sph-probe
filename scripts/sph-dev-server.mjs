@@ -10,6 +10,7 @@
  *   node scripts/sph-dev-server.mjs            # http://127.0.0.1:8787
  *   SPH_COOKIE="你的元宝cookie" PORT=8080 node scripts/sph-dev-server.mjs
  *   SPH_ADMIN_PASSWORD="管理密码" node scripts/sph-dev-server.mjs   # 启用 /admin 管理入口
+ *   SILICONFLOW_API_KEY="sk-xxx" node scripts/sph-dev-server.mjs    # 启用 ASR 转文字（也可在 /admin 在线配置）
  *   HOST=0.0.0.0 node scripts/sph-dev-server.mjs   # 默认即 0.0.0.0，局域网可访问
  *
  * 说明：
@@ -18,10 +19,11 @@
  *   - 默认监听 0.0.0.0，同一局域网的手机/其他电脑可访问；如无法访问请检查防火墙。
  */
 import { createServer } from "node:http";
-import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, createWriteStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
@@ -33,6 +35,7 @@ const host = process.env.HOST || "0.0.0.0";
 const port = Number(process.env.PORT || 8787);
 const cookie = process.env.SPH_COOKIE || "";
 const adminPassword = process.env.SPH_ADMIN_PASSWORD || "";
+const siliconflowApiKey = process.env.SILICONFLOW_API_KEY || "";
 
 // KV：文件持久化（模拟 Cloudflare KV，重启不丢）
 const kvPath = process.env.SPH_KV || join(root, "data", "kv.json");
@@ -342,6 +345,49 @@ const yt = {
   },
 };
 
+// ============ ASR 支持（ffmpeg 抽音频 → worker 上传 SiliconFlow） ============
+// ffmpeg 路径：与 yt-dlp 一致优先 /usr/bin，回退 PATH
+const ffmpegBin = existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : "ffmpeg";
+const asrTmpDir = join(root, "data", "tmp");
+mkdirSync(asrTmpDir, { recursive: true });
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffmpegBin, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("error", (e) => reject(new Error("ffmpeg 不可用: " + e.message)));
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("ffmpeg 抽取音频超时"));
+    }, 120000);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error("ffmpeg 抽取音频失败: " + (stderr.slice(-200) || `退出码 ${code}`)));
+    });
+  });
+}
+
+const asr = {
+  // 下载视频 → ffmpeg 抽取 16kHz 单声道 mp3（大幅缩小上传体积），返回 { bytes, filename }
+  async prepareAudio(url) {
+    const id = randomBytes(6).toString("hex");
+    const videoPath = join(asrTmpDir, `sph-asr-${id}.bin`);
+    const audioPath = join(asrTmpDir, `sph-asr-${id}.mp3`);
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`下载视频失败: http ${resp.status}`);
+      await pipeline(Readable.fromWeb(resp.body), createWriteStream(videoPath));
+      await runFfmpeg(["-y", "-i", videoPath, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", audioPath]);
+      return { bytes: readFileSync(audioPath), filename: "audio.mp3" };
+    } finally {
+      rmSync(videoPath, { force: true });
+      rmSync(audioPath, { force: true });
+    }
+  },
+};
+
 const dbEnv = {
   logParse(e) {
     logStmt.run(
@@ -533,9 +579,11 @@ const server = createServer(async (req, res) => {
       {
         COOKIE: cookie,
         ADMIN_PASSWORD: adminPassword,
+        SILICONFLOW_API_KEY: siliconflowApiKey,
         COOKIE_KV: kv,
         DB: dbEnv,
         YT: yt,
+        ASR: asr,
       },
       {}
     );
@@ -569,6 +617,7 @@ server.listen(port, host, () => {
   }
   console.log(`cookie: ${cookie ? "已配置 (SPH_COOKIE)" : "未配置 —— 解析接口将报错，仅可测试页面/错误提示"}`);
   console.log(`admin: ${adminPassword ? "已配置 (SPH_ADMIN_PASSWORD)，入口 /admin" : "未配置 —— /admin 不可用"}`);
+  console.log(`ASR: ${siliconflowApiKey ? "已配置 (SILICONFLOW_API_KEY)" : "未配置 —— 可在 /admin 在线设置 key"}，ffmpeg 抽取音频（${ffmpegBin}）`);
   console.log(`KV: 文件持久化 @ ${kvPath}（COOKIE_KV，含在线修改的密码）`);
   console.log(`DB: SQLite @ ${dbPath}（解析留痕 / 示例链接 / 广告位，SPH_DB 可改路径）`);
   console.log("修改 internal/api/sph/ 下文件后直接刷新浏览器即可。");

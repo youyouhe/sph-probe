@@ -7,6 +7,7 @@
 ## 功能
 
 - **视频号解析**：粘贴 `https://weixin.qq.com/sph/...` 分享链接 → 标题、作者、封面、多清晰度直链
+- **语音转文字（ASR）**：解析后一键转写视频语音，走 SiliconFlow（默认 `TeleAI/TeleSpeechASR`，可切 `FunAudioLLM/SenseVoiceSmall`），结果按视频缓存不重复扣费
 - **YouTube 解析**：通过 yt-dlp 解析视频信息与清晰度（VPS 模式；下载中转默认关闭，`YT_DOWNLOAD_DISABLED` 开关）
 - **管理后台** `/admin`：密码认证 → 在线更新全站 Cookie、YouTube cookies、示例链接、广告位、修改密码
 - **统计页** `/stats`：解析量趋势、成功率、来源分布（数据来自 parse_logs）
@@ -45,8 +46,11 @@ SPH_ADMIN_PASSWORD="管理密码" node scripts/sph-dev-server.mjs
 |------|------|
 | `SPH_COOKIE` | 视频号接口所需的元宝 Web 端 Cookie |
 | `SPH_ADMIN_PASSWORD` | 管理员密码，设置后启用 `/admin` |
+| `SILICONFLOW_API_KEY` | SiliconFlow API Key，启用 ASR 转文字（也可在 `/admin` 在线配置） |
 | `SPH_KV` / `SPH_DB` | KV / SQLite 数据文件路径（默认 `data/`） |
 | `HOST` / `PORT` | 监听地址，默认 `0.0.0.0:8787` |
+
+> ASR 依赖 ffmpeg 抽取音频（VPS 部署脚本会自动装；本地需自行安装）。Cloudflare Worker 模式直接上传原视频，超过 25MB 无法转写。
 
 ## VPS 部署
 
@@ -70,5 +74,6 @@ SPH_ADMIN_PASSWORD="管理密码" node scripts/sph-dev-server.mjs
 | `COOKIE` | plain text | 元宝 Web 端 Cookie（必填） |
 | `ADMIN_PASSWORD` | plain text | 管理员密码（可选，启用 `/admin`） |
 | `COOKIE_KV` | KV namespace | 全站 Cookie 在线更新（可选） |
+| `SILICONFLOW_API_KEY` | plain text | SiliconFlow API Key（可选，ASR 转文字；也可在 `/admin` 配置） |
 
 > 本项目衍生于 [ltaoo/wx_channels_download](https://github.com/ltaoo/wx_channels_download) 的 sph 命令，解析逻辑对应其 `fetch_video_profile.go`。

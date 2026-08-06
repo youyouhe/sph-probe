@@ -920,6 +920,16 @@
         <button class="btn primary" id="downloadBtn">下载视频</button>
         <button class="btn" id="copyBtn">复制直链</button>
         <button class="btn" id="copyMinBtn">精简链接</button>
+        <button class="btn" id="asrBtn">转文字</button>
+      </div>
+
+      <div id="asrBlock" hidden>
+        <div class="sec-label">语音转文字</div>
+        <div class="cookie-status" id="asrStatus" hidden></div>
+        <p class="desc" id="asrText" style="white-space:pre-wrap;max-height:240px;overflow:auto;" hidden></p>
+        <div class="modal-actions" id="asrActions" hidden>
+          <button class="btn" id="asrCopy">复制文本</button>
+        </div>
       </div>
 
       <div class="links" id="linksRow" hidden>
@@ -1018,6 +1028,16 @@
             <button class="btn primary" id="ytCookieSave">保存并检查</button>
             <button class="btn" id="ytCookieCheck">仅检查</button>
             <button class="btn danger-ghost" id="ytCookieClear">清除</button>
+          </div>
+        </div>
+        <div class="admin-section">
+          <div class="sec-label">ASR 语音转文字（SiliconFlow）</div>
+          <div class="cookie-status" id="asrCfgStatus">未配置</div>
+          <input type="password" id="asrKeyInput" placeholder="SiliconFlow API Key（sk-...）" autocomplete="off" spellcheck="false">
+          <input type="text" id="asrModelInput" placeholder="模型（默认 TeleAI/TeleSpeechASR）" spellcheck="false">
+          <div class="modal-actions">
+            <button class="btn primary" id="asrCfgSave">保存</button>
+            <button class="btn danger-ghost" id="asrCfgClear">清除 key</button>
           </div>
         </div>
         <div class="admin-section">
@@ -1174,6 +1194,7 @@
       $("qualityBlock").hidden = true;
       $("actionsRow").hidden = true;
       $("linksRow").hidden = true;
+      resetAsr();
       jsonView.textContent = JSON.stringify({ error: msg }, null, 2);
     }
 
@@ -1181,6 +1202,7 @@
       const fi = (data.data && data.data.feedInfo) || {};
       const ai = (data.data && data.data.authorInfo) || {};
       current = { fi, ai, raw: data, queryUrl };
+      resetAsr();
 
       /* 候选视频源：H.264 / H.265 / 兜底 */
       const variants = [];
@@ -1356,6 +1378,59 @@
       }
     }
 
+    /* ============ ASR 语音转文字 ============ */
+    let asrResult = { key: "", text: "" };   // 当前视频的转写结果（key = 分享链接）
+
+    function resetAsr() {
+      asrResult = { key: "", text: "" };
+      $("asrBlock").hidden = true;
+      $("asrStatus").hidden = true;
+      $("asrText").hidden = true;
+      $("asrActions").hidden = true;
+    }
+
+    async function transcribeCurrent() {
+      if (!current || !current.variants.length) return;
+      const url = current.variants[current.activeIdx].url;
+      const key = current.queryUrl || url;
+      // 同一视频重复点击直接展示已有结果
+      if (asrResult.key === key && asrResult.text) {
+        $("asrBlock").hidden = false;
+        $("asrStatus").hidden = true;
+        $("asrText").hidden = false;
+        $("asrActions").hidden = false;
+        return;
+      }
+      const status = $("asrStatus");
+      $("asrBlock").hidden = false;
+      $("asrText").hidden = true;
+      $("asrActions").hidden = true;
+      status.hidden = false;
+      status.className = "cookie-status";
+      status.textContent = "转写中…（视频较长时可能需要 1-2 分钟）";
+      $("asrBtn").disabled = true;
+      try {
+        const resp = await fetch(`${API_BASE}/asr`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, shareUrl: current.queryUrl || "" }),
+        });
+        const data = await resp.json();
+        if (!data.ok) throw new Error(data.error || "转写失败");
+        asrResult = { key, text: data.text || "" };
+        status.hidden = true;
+        $("asrText").textContent = data.text || "（未识别到语音）";
+        $("asrText").hidden = false;
+        $("asrActions").hidden = false;
+        if (data.cached) showToast("已加载缓存的转写结果");
+      } catch (err) {
+        status.className = "cookie-status bad";
+        status.textContent = err.message;
+      } finally {
+        $("asrBtn").disabled = false;
+      }
+    }
+
     /* ============ 历史记录 ============ */
     function getHistory() {
       try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"); }
@@ -1497,6 +1572,7 @@
       loadAdminExamples();
       loadAdminAd();
       loadAdminYtCookie();
+      loadAdminAsrConfig();
       $("settingsModal").hidden = false;
       $("cookieInput").focus();
     }
@@ -1893,6 +1969,10 @@
     $("copyMinBtn").addEventListener("click", () => {
       if (current && current.variants.length) copyText(minimizeUrl(current.variants[current.activeIdx].url), "精简链接已复制");
     });
+    $("asrBtn").addEventListener("click", transcribeCurrent);
+    $("asrCopy").addEventListener("click", () => {
+      if (asrResult.text) copyText(asrResult.text, "转写文本已复制");
+    });
     $("historyClear").addEventListener("click", () => {
       try { localStorage.removeItem(HISTORY_KEY); } catch (e) { /* ignore */ }
       renderHistory();
@@ -2060,6 +2140,59 @@
         showToast("清除失败：" + e.message, true);
       }
     });
+
+    /* ASR 配置管理 */
+    async function loadAdminAsrConfig() {
+      try {
+        const resp = await adminFetch("/admin/asr_config");
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return;
+        }
+        const el = $("asrCfgStatus");
+        if (data.ok) {
+          el.textContent = data.configured
+            ? `已配置 key（当前模型：${data.model}）`
+            : "未配置 —— 转文字功能不可用";
+          el.className = "cookie-status" + (data.configured ? " ok" : "");
+          $("asrModelInput").placeholder = `模型（默认 ${data.defaultModel || "TeleAI/TeleSpeechASR"}）`;
+        }
+      } catch (e) { /* 保持默认 */ }
+    }
+    async function saveAsrConfig(clear) {
+      const apiKey = clear ? "" : $("asrKeyInput").value.trim();
+      const model = $("asrModelInput").value.trim();
+      if (!clear && !apiKey) { showToast("请输入 API key（清除请点「清除 key」）", true); return; }
+      try {
+        const resp = await adminFetch("/admin/asr_config", {
+          method: "POST",
+          body: JSON.stringify({ apiKey, model }),
+        });
+        const data = await resp.json();
+        if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+          clearAdminToken();
+          adminMode = false;
+          closeSettings();
+          showAuthModal();
+          return;
+        }
+        if (data.ok) {
+          $("asrKeyInput").value = "";
+          showToast(clear ? "ASR key 已清除" : "ASR 配置已保存");
+          loadAdminAsrConfig();
+        } else {
+          showToast(data.message || "保存失败", true);
+        }
+      } catch (e) {
+        showToast("保存失败：" + e.message, true);
+      }
+    }
+    $("asrCfgSave").addEventListener("click", () => saveAsrConfig(false));
+    $("asrCfgClear").addEventListener("click", () => saveAsrConfig(true));
 
     /* 修改管理员密码 */
     $("pwdSave").addEventListener("click", async () => {

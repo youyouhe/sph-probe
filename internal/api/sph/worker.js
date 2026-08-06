@@ -118,6 +118,16 @@ export default {
       return handleAdminAd(request, env);
     }
 
+    // POST /api/asr —— 视频号视频语音转文字（SiliconFlow）
+    if (url.pathname === "/api/asr" && request.method === "POST") {
+      return handleAsr(request, env);
+    }
+
+    // GET/POST /api/admin/asr_config —— ASR key/模型管理（需 Bearer token）
+    if (url.pathname === "/api/admin/asr_config" && (request.method === "GET" || request.method === "POST")) {
+      return handleAdminAsrConfig(request, env);
+    }
+
     // POST /api/admin/change_password —— 在线修改管理员密码（需 Bearer token + 当前密码）
     if (url.pathname === "/api/admin/change_password" && request.method === "POST") {
       return handleAdminChangePassword(request, env);
@@ -132,7 +142,7 @@ function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
   };
 }
 
@@ -504,6 +514,182 @@ async function handleAdminYtCookieCheck(request, env) {
     const result = await env.YT.checkCookies();
     return json({ ok: true, valid: result.valid, reason: result.reason || "", message: result.message || "", title: result.title || "" });
   } catch (e) {
+    return json({ ok: false, reason: "error", message: e.message }, 500);
+  }
+}
+
+// ---- ASR 语音转文字（SiliconFlow） ----
+
+const ASR_API_URL = "https://api.siliconflow.cn/v1/audio/transcriptions";
+const ASR_DEFAULT_MODEL = "TeleAI/TeleSpeechASR";
+// Worker 直接下载原视频的上限（SiliconFlow 文件上限约 25MB）；VPS 走 ffmpeg 抽音频，不受此限
+const ASR_MAX_BYTES = 25 * 1024 * 1024;
+
+// 当前生效的 ASR 配置：KV 在线设置优先，回退部署注入的 SILICONFLOW_API_KEY 绑定
+async function resolveAsrConfig(env) {
+  let apiKey = "";
+  let model = "";
+  if (env.COOKIE_KV && env.COOKIE_KV.get) {
+    apiKey = (await env.COOKIE_KV.get("asr_api_key")) || "";
+    model = (await env.COOKIE_KV.get("asr_model")) || "";
+  }
+  if (!apiKey) apiKey = env.SILICONFLOW_API_KEY || "";
+  return { apiKey, model: model || ASR_DEFAULT_MODEL };
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// 调 SiliconFlow 转写接口（OpenAI 兼容 multipart），返回文本
+async function transcribeViaSiliconFlow(bytes, filename, apiKey, model) {
+  const form = new FormData();
+  form.append("file", new Blob([bytes]), filename);
+  form.append("model", model);
+  const resp = await fetch(ASR_API_URL, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+  if (!resp.ok) {
+    const detail = (await resp.text()).slice(0, 200);
+    log("[asr] siliconflow http", resp.status, detail);
+    if (resp.status === 401 || resp.status === 403) {
+      throw new Error("ASR API key 无效或已过期（SiliconFlow 返回 " + resp.status + "）");
+    }
+    throw new Error(`SiliconFlow 转写失败: http ${resp.status} ${detail}`);
+  }
+  const result = await resp.json();
+  return (result && result.text) || "";
+}
+
+async function handleAsr(request, env) {
+  const startedAt = Date.now();
+  let videoUrl = "";
+  try {
+    const body = await request.json();
+    videoUrl = body && typeof body.url === "string" ? body.url.trim() : "";
+    const exportId = body && typeof body.exportId === "string" ? body.exportId.trim() : "";
+    // 前端拿不到 exportId 时用分享链接做缓存键（同一视频直链每次解析都会变，分享链接稳定）
+    const shareUrl = body && typeof body.shareUrl === "string" ? body.shareUrl.trim() : "";
+    if (!/^https?:\/\//i.test(videoUrl)) {
+      return json({ ok: false, reason: "bad_request", error: "url 参数不合法" }, 400);
+    }
+    const { apiKey, model } = await resolveAsrConfig(env);
+    if (!apiKey) {
+      return json({ ok: false, reason: "no_key", error: "未配置 ASR API key（管理员可在 /admin 设置，或部署时注入 SILICONFLOW_API_KEY）" });
+    }
+
+    // 缓存：同一视频不重复扣费
+    const cacheId = exportId || shareUrl || (await sha256Hex(videoUrl));
+    const cacheKey = `asr:${model}:${cacheId}`;
+    if (env.COOKIE_KV && env.COOKIE_KV.get) {
+      const cached = await env.COOKIE_KV.get(cacheKey);
+      if (cached) {
+        return json({ ok: true, text: cached, model, cached: true });
+      }
+    }
+
+    // 取音频：VPS 用 ffmpeg 抽取压缩音频；Worker 直接下载原视频（限 25MB）
+    let bytes, filename;
+    if (env.ASR && typeof env.ASR.prepareAudio === "function") {
+      const audio = await env.ASR.prepareAudio(videoUrl);
+      bytes = audio.bytes;
+      filename = audio.filename;
+    } else {
+      const resp = await fetch(videoUrl);
+      if (!resp.ok) throw new Error(`下载视频失败: http ${resp.status}`);
+      const size = Number(resp.headers.get("content-length") || 0);
+      if (size > ASR_MAX_BYTES) {
+        return json({ ok: false, reason: "too_large", error: "视频超过 25MB，当前部署无法转写（VPS 部署可通过 ffmpeg 压缩音频，不受此限）" });
+      }
+      bytes = await resp.arrayBuffer();
+      if (bytes.byteLength > ASR_MAX_BYTES) {
+        return json({ ok: false, reason: "too_large", error: "视频超过 25MB，当前部署无法转写（VPS 部署可通过 ffmpeg 压缩音频，不受此限）" });
+      }
+      filename = "video.mp4";
+    }
+
+    const text = await transcribeViaSiliconFlow(bytes, filename, apiKey, model);
+    if (env.COOKIE_KV && env.COOKIE_KV.put && text) {
+      await env.COOKIE_KV.put(cacheKey, text);
+    }
+    logParse(env, {
+      ts: Math.floor(startedAt / 1000),
+      ip: clientIp(request),
+      ua: request.headers.get("user-agent") || "",
+      referer: request.headers.get("referer") || "",
+      shareUrl: videoUrl,
+      exportId: exportId || "",
+      author: "",
+      description: text.slice(0, 500),
+      videoUrl,
+      ok: 1,
+      error: "",
+      durationMs: Date.now() - startedAt,
+      cookieSource: "asr",
+      platform: "sph",
+    });
+    return json({ ok: true, text, model, cached: false });
+  } catch (err) {
+    log("[handleAsr] error:", err.message);
+    logParse(env, {
+      ts: Math.floor(startedAt / 1000),
+      ip: clientIp(request),
+      ua: request.headers.get("user-agent") || "",
+      referer: request.headers.get("referer") || "",
+      shareUrl: videoUrl,
+      exportId: "",
+      author: "",
+      description: "",
+      videoUrl,
+      ok: 0,
+      error: err.message.slice(0, 300),
+      durationMs: Date.now() - startedAt,
+      cookieSource: "asr",
+      platform: "sph",
+    });
+    return json({ ok: false, reason: "error", error: err.message.slice(0, 300) });
+  }
+}
+
+async function handleAdminAsrConfig(request, env) {
+  const denied = await requireAdmin(request, env);
+  if (denied) return denied;
+  if (request.method === "GET") {
+    const { apiKey, model } = await resolveAsrConfig(env);
+    return json({
+      ok: true,
+      configured: !!apiKey,
+      hasEnvKey: !!(env.SILICONFLOW_API_KEY || ""),
+      kv: !!(env.COOKIE_KV && env.COOKIE_KV.put),
+      model,
+      defaultModel: ASR_DEFAULT_MODEL,
+    });
+  }
+  if (!env.COOKIE_KV || !env.COOKIE_KV.put) {
+    return json({ ok: false, reason: "no_kv", message: "未绑定 KV，无法保存（key 由部署配置注入）" });
+  }
+  try {
+    const body = await request.json();
+    const apiKey = body && typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+    const model = body && typeof body.model === "string" ? body.model.trim() : "";
+    if (apiKey) {
+      await env.COOKIE_KV.put("asr_api_key", apiKey);
+    } else {
+      // 空 key = 清除在线配置（回退到部署注入的绑定）
+      await env.COOKIE_KV.delete("asr_api_key");
+    }
+    if (model) {
+      await env.COOKIE_KV.put("asr_model", model);
+    } else {
+      await env.COOKIE_KV.delete("asr_model");
+    }
+    log("[admin] ASR 配置已更新, key:", apiKey ? `已设置(长度${apiKey.length})` : "已清除", "model:", model || ASR_DEFAULT_MODEL);
+    return json({ ok: true });
+  } catch (e) {
+    log("[handleAdminAsrConfig] error:", e.message);
     return json({ ok: false, reason: "error", message: e.message }, 500);
   }
 }
