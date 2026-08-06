@@ -19,7 +19,7 @@
  *   - 默认监听 0.0.0.0，同一局域网的手机/其他电脑可访问；如无法访问请检查防火墙。
  */
 import { createServer } from "node:http";
-import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, createWriteStream } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, rmSync, createWriteStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { Readable } from "node:stream";
@@ -350,6 +350,10 @@ const yt = {
 const ffmpegBin = existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : "ffmpeg";
 const asrTmpDir = join(root, "data", "tmp");
 mkdirSync(asrTmpDir, { recursive: true });
+// 启动时清理上次异常退出残留的 ASR 临时文件（正常流程每次用完即删，这里只是兜底）
+for (const f of readdirSync(asrTmpDir)) {
+  if (f.startsWith("sph-asr-")) rmSync(join(asrTmpDir, f), { force: true });
+}
 
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
