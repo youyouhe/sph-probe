@@ -61,9 +61,12 @@ SPH_ADMIN_PASSWORD="管理密码" node scripts/sph-dev-server.mjs
 脚本会自动：安装 Node 22+ 与 nginx → 创建 `/opt/sph` 与专用用户 → 生成随机 admin 密码 → 配置 systemd 开机自启 + nginx 反代。建议搭配 cron（生产实际使用）：
 
 ```cron
-0 8 * * * node /opt/sph/scripts/wasm-monitor.mjs >> /opt/sph/data/wasm-monitor.log 2>&1
+0 8 * * * sudo -n -u sph bash -c "node /opt/sph/scripts/wasm-monitor.mjs >> /opt/sph/data/wasm-monitor.log 2>&1"
 0 6 * * * sudo bash /opt/sph/scripts/update-ytdlp.sh
 ```
+
+> 注意：`data/` 归 `sph` 用户所有，wasm-monitor 的输出重定向必须在 `sph` 用户下执行，
+> 否则 cron 静默失败（日志永远为空）。
 
 ## Cloudflare Worker 部署
 
