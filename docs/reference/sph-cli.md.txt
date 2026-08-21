@@ -1,0 +1,74 @@
+---
+title: 视频号查询部署
+---
+
+# sph_deploy
+
+将视频号视频信息查询页面部署到 Cloudflare Worker，提供 Web 界面查询视频号视频下载地址。
+
+## 用法
+
+```sh
+wx_video_download sph_deploy
+```
+
+## 前置条件
+
+- 拥有 Cloudflare 账号，并获取 Account ID 和 API Token
+- API Token 需要有 Workers 相关的读写权限
+
+## 配置
+
+在配置文件中添加以下字段：
+
+```yaml
+cloudflare:
+  accountId: "your-cloudflare-account-id"
+  apiToken: "your-cloudflare-api-token"
+  sphWorkerName: "worker-name"
+  sphCookie: "元宝 web 端 cookie"
+  sphAdminPassword: "管理员密码（可选）"
+  sphKvNamespaceId: "KV namespace ID（可选）"
+  siliconflowApiKey: "SiliconFlow API Key（可选，ASR 语音转文字）"
+```
+
+| 配置项 | 说明 |
+|--------|------|
+| `cloudflare.accountId` | Cloudflare 账户 ID，可在 Workers 页面找到 |
+| `cloudflare.apiToken` | Cloudflare API Token，需 Workers 读写权限 |
+| `cloudflare.sphWorkerName` | Worker 名称，部署后标识该 Worker |
+| `cloudflare.sphCookie` | 视频号接口所需的元宝 Web 端 Cookie |
+| `cloudflare.sphAdminPassword` | 可选。配置后启用 `/admin` 管理入口（密码认证） |
+| `cloudflare.sphKvNamespaceId` | 可选。配置后全站 Cookie 可在 `/admin` 在线更新（需先在 Cloudflare 创建 KV namespace），否则更新仅对管理员浏览器生效 |
+| `cloudflare.siliconflowApiKey` | 可选。SiliconFlow API Key，启用「转文字」功能（ASR 语音转写，默认模型 TeleAI/TeleSpeechASR）；也可在 `/admin` 在线配置（需 KV） |
+
+元宝Web端 指 https://yuanbao.tencent.com/ 网站，登录后，获取 `cookie` 作为配置即可
+
+## 说明
+
+- 部署内容为 `internal/api/sph/` 目录下的 `worker.js` 和 `index.html`
+- Worker 运行在 Cloudflare 边缘节点，无需自有服务器
+- Cookie 以环境变量的方式注入 Worker，用于调用视频号接口时的身份认证
+
+## 可用 API
+
+| Method | Path | 说明 |
+|--------|------|------|
+| GET | `/` | 视频号视频信息查询页面 |
+| POST | `/api/fetch_video_profile` | 通过分享链接获取视频号视频信息 |
+| POST | `/api/check_cookie` | 轻量检查 cookie 是否有效 |
+| GET | `/admin` | 管理员入口（需密码认证，配置 `sphAdminPassword` 后可用） |
+| POST | `/api/admin_auth` | 管理员密码认证，换取短期 token |
+| GET/POST | `/api/admin_cookie` | 查看/更新全站默认 Cookie（需 KV，Bearer token） |
+| POST | `/api/asr` | 视频号视频语音转文字（SiliconFlow，body: `{url, shareUrl?}`） |
+| GET/POST | `/api/admin/asr_config` | 查看/更新 ASR API key 与模型（需 KV，Bearer token；GET 不回显 key） |
+
+## ASR 语音转文字
+
+解析结果页提供「转文字」按钮，将视频语音转写为文本（同一视频结果会缓存，不重复扣费）。
+API key 优先使用 `/admin` 在线配置（存 KV），未配置时回退到 `siliconflowApiKey` 绑定。
+注意：Worker 直接上传原视频，超过 25MB 无法转写；用 `scripts/sph-dev-server.mjs` 跑在 VPS 上时会先用 ffmpeg 抽取压缩音频，不受此限制（需设置 `SILICONFLOW_API_KEY` 环境变量或在 `/admin` 配置）。
+
+## 管理员入口
+
+访问 `/admin` 输入密码后即可管理 Cookie：可在线更新全站默认 Cookie（配置了 KV 时对所有访客生效），普通用户访问 `/` 不显示任何管理入口。

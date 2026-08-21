@@ -1041,6 +1041,26 @@
           </div>
         </div>
         <div class="admin-section">
+          <div class="sec-label">MCP 服务（AI 客户端接入）</div>
+          <div class="cookie-status" id="mcpStatus">未启用</div>
+          <label class="ad-row"><input type="checkbox" id="mcpEnabled"> 启用 MCP 端点</label>
+          <input type="text" id="mcpTokenInput" placeholder="访问令牌（留空 = 免认证开放，每 IP 每天限 10 次）" autocomplete="off" spellcheck="false">
+          <div class="modal-actions">
+            <button class="btn" id="mcpTokenGen">随机生成令牌</button>
+            <button class="btn primary" id="mcpSave">保存</button>
+            <button class="btn" id="mcpTest">测试</button>
+          </div>
+          <p class="desc" id="mcpEndpoint" hidden></p>
+        </div>
+        <div class="admin-section">
+          <div class="sec-label">限流设置（匿名访问保护，保存即时生效）</div>
+          <div class="cookie-status" id="limitsStatus"></div>
+          <input type="number" id="limitDaily" min="1" max="1000" placeholder="每日解析次数上限 / IP（默认 10）">
+          <input type="number" id="limitAnonAsr" min="1" max="120" placeholder="匿名 ASR 时长上限，分钟（默认 5）">
+          <input type="number" id="limitAsrCache" min="10" max="10000" placeholder="ASR 缓存条数上限（默认 100，LRU 淘汰）">
+          <div class="modal-actions"><button class="btn primary" id="limitsSave">保存</button></div>
+        </div>
+        <div class="admin-section">
           <div class="sec-label">修改管理员密码</div>
           <input type="password" id="pwdCurrent" placeholder="当前密码" autocomplete="off">
           <input type="password" id="pwdNew" placeholder="新密码（至少 6 位）" autocomplete="new-password">
@@ -1082,6 +1102,16 @@
     $("emptyState").querySelector("h2").textContent = "粘贴" + "视频号" + "分享链接";
     $("emptyState").querySelector("p").textContent = SLOGAN;
     document.title = BRAND + " · 链接解析";
+
+    /* 功能开关：屏蔽中的功能隐藏入口（YouTube 标签 / 转文字按钮） */
+    fetch(`${API_BASE}/features`)
+      .then((r) => r.json())
+      .then((f) => {
+        if (!f || !f.ok) return;
+        if (!f.asr) $("asrBtn").hidden = true;
+        if (!f.youtube) document.querySelector('[data-platform="yt"]').hidden = true;
+      })
+      .catch(() => {});
 
     /* ============ 状态 ============ */
     let current = null;   // { feedInfo, authorInfo, raw, variants, activeIdx }
@@ -1171,6 +1201,12 @@
         renderResult(data, target);
         saveHistory(target);
         setCanvasStatus("");
+        // 接近每日上限时温和提示剩余次数（dailyRemaining=-1 表示不限流/管理员）
+        if (typeof data.dailyRemaining === "number" && data.dailyRemaining >= 0 && data.dailyRemaining <= 3) {
+          showToast(data.dailyRemaining === 0
+            ? "今天的免费解析次数用完啦，明天再来吧～"
+            : `温馨提示：今天还剩 ${data.dailyRemaining} 次免费解析`);
+        }
       } catch (err) {
         let msg = err.message;
         if (/http 401/.test(msg)) {
@@ -1389,6 +1425,24 @@
       $("asrActions").hidden = true;
     }
 
+    // 轮询异步转写任务（长视频转写超过 CF ~100s 代理超时，后端改后台执行）
+    async function pollAsrStatus(jobId, status) {
+      const startedAt = Date.now();
+      const TIMEOUT = 10 * 60 * 1000; // 最长等 10 分钟
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        status.textContent = `转写中…（已等待 ${elapsed} 秒，长视频可能需要几分钟）`;
+        if (Date.now() - startedAt > TIMEOUT) throw new Error("转写超时，请稍后重新点击（已完成的进度不会丢失）");
+        const resp = await fetch(`${API_BASE}/asr/status?jobId=${encodeURIComponent(jobId)}`);
+        const data = await resp.json().catch(() => null);
+        if (!data) continue; // 单次轮询失败不致命，继续等
+        if (!data.ok) throw new Error(data.error || "查询转写状态失败");
+        if (data.status === "done") return data.text || "";
+        if (data.status === "error") throw new Error(data.error || "转写失败");
+      }
+    }
+
     async function transcribeCurrent() {
       if (!current || !current.variants.length) return;
       const url = current.variants[current.activeIdx].url;
@@ -1407,7 +1461,7 @@
       $("asrActions").hidden = true;
       status.hidden = false;
       status.className = "cookie-status";
-      status.textContent = "转写中…（视频较长时可能需要 1-2 分钟）";
+      status.textContent = "转写中…（视频较长时可能需要几分钟）";
       $("asrBtn").disabled = true;
       try {
         const resp = await fetch(`${API_BASE}/asr`, {
@@ -1415,14 +1469,20 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url, shareUrl: current.queryUrl || "" }),
         });
-        const data = await resp.json();
+        // 网关/代理超时可能返回 HTML 错误页（如 Cloudflare 524），resp.json() 会抛 "not valid JSON"
+        const data = await resp.json().catch(() => null);
+        if (!data) throw new Error(`转写请求失败（HTTP ${resp.status}），请稍后重试`);
         if (!data.ok) throw new Error(data.error || "转写失败");
-        asrResult = { key, text: data.text || "" };
+        let text = data.text || "";
+        if (data.pending) {
+          text = await pollAsrStatus(data.jobId, status);
+        }
+        asrResult = { key, text };
         status.hidden = true;
-        $("asrText").textContent = data.text || "（未识别到语音）";
+        $("asrText").textContent = text || "（未识别到语音）";
         $("asrText").hidden = false;
         $("asrActions").hidden = false;
-        if (data.cached) showToast("已加载缓存的转写结果");
+        if (data.cached && !data.pending) showToast("已加载缓存的转写结果");
       } catch (err) {
         status.className = "cookie-status bad";
         status.textContent = err.message;
@@ -1573,6 +1633,8 @@
       loadAdminAd();
       loadAdminYtCookie();
       loadAdminAsrConfig();
+      loadAdminMcpConfig();
+      loadAdminLimits();
       $("settingsModal").hidden = false;
       $("cookieInput").focus();
     }
@@ -2193,6 +2255,124 @@
     }
     $("asrCfgSave").addEventListener("click", () => saveAsrConfig(false));
     $("asrCfgClear").addEventListener("click", () => saveAsrConfig(true));
+
+    /* MCP 服务管理 */
+    function handleAdmin401(resp, data) {
+      if (resp.status === 401 || (data && data.reason === "unauthorized")) {
+        clearAdminToken();
+        adminMode = false;
+        closeSettings();
+        showAuthModal();
+        return true;
+      }
+      return false;
+    }
+    function renderMcpState(data) {
+      const el = $("mcpStatus");
+      el.textContent = data.enabled
+        ? `已启用（${data.configured ? "令牌认证，不限流" : "免认证开放，每 IP 每天限 10 次"}），工具：${(data.tools || []).join("、")}`
+        : "未启用 —— /mcp 端点已关闭";
+      el.className = "cookie-status" + (data.enabled ? " ok" : "");
+      $("mcpEnabled").checked = !!data.enabled;
+      const ep = $("mcpEndpoint");
+      ep.hidden = !data.enabled;
+      if (data.enabled) {
+        ep.textContent = data.configured
+          ? `端点：${location.origin}/mcp ，认证：Authorization: Bearer <令牌>`
+          : `端点：${location.origin}/mcp （免认证，每 IP 每天限 10 次调用）`;
+      }
+    }
+    async function loadAdminMcpConfig() {
+      try {
+        const resp = await adminFetch("/admin/mcp_config");
+        const data = await resp.json();
+        if (handleAdmin401(resp, data)) return;
+        if (data.ok) {
+          renderMcpState(data);
+          $("mcpTokenInput").value = data.token || "";
+        }
+      } catch (e) { /* 保持默认 */ }
+    }
+    $("mcpTokenGen").addEventListener("click", () => {
+      $("mcpTokenInput").value = [...crypto.getRandomValues(new Uint8Array(24))]
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    });
+    $("mcpSave").addEventListener("click", async () => {
+      const enabled = $("mcpEnabled").checked;
+      const token = $("mcpTokenInput").value.trim();
+      try {
+        const resp = await adminFetch("/admin/mcp_config", {
+          method: "POST",
+          body: JSON.stringify({ enabled, token, clearToken: !token }),
+        });
+        const data = await resp.json();
+        if (handleAdmin401(resp, data)) return;
+        if (data.ok) {
+          renderMcpState(data);
+          $("mcpTokenInput").value = data.token || "";
+          showToast(
+            data.enabled
+              ? data.configured ? "MCP 已启用（令牌认证，不限流）" : "MCP 已启用（免认证开放，每 IP 每天限 10 次）"
+              : "MCP 已停用"
+          );
+        } else {
+          showToast(data.message || "保存失败", true);
+        }
+      } catch (e) {
+        showToast("保存失败：" + e.message, true);
+      }
+    });
+    $("mcpTest").addEventListener("click", async () => {
+      try {
+        const resp = await adminFetch("/admin/mcp_test", { method: "POST" });
+        const data = await resp.json();
+        if (handleAdmin401(resp, data)) return;
+        if (data.ok) {
+          showToast(`MCP ${data.message}${data.enabled ? "" : "（当前未启用，仅协议自检）"}`);
+        } else {
+          showToast("MCP 测试失败：" + (data.message || "未知错误"), true);
+        }
+      } catch (e) {
+        showToast("MCP 测试失败：" + e.message, true);
+      }
+    });
+
+    /* 限流设置 */
+    async function loadAdminLimits() {
+      try {
+        const resp = await adminFetch("/admin/limits");
+        const data = await resp.json();
+        if (handleAdmin401(resp, data)) return;
+        if (data.ok) {
+          $("limitDaily").value = data.dailyLimit;
+          $("limitAnonAsr").value = data.anonAsrMinutes;
+          $("limitAsrCache").value = data.asrCacheMax;
+          $("limitsStatus").textContent = `当前：每 IP 每天 ${data.dailyLimit} 次解析；匿名 ASR 限 ${data.anonAsrMinutes} 分钟内视频；缓存 ${data.asrCacheMax} 条`;
+        }
+      } catch (e) { /* 保持默认 */ }
+    }
+    $("limitsSave").addEventListener("click", async () => {
+      const dailyLimit = Number($("limitDaily").value);
+      const anonAsrMinutes = Number($("limitAnonAsr").value);
+      const asrCacheMax = Number($("limitAsrCache").value);
+      try {
+        const resp = await adminFetch("/admin/limits", {
+          method: "POST",
+          body: JSON.stringify({ dailyLimit, anonAsrMinutes, asrCacheMax }),
+        });
+        const data = await resp.json();
+        if (handleAdmin401(resp, data)) return;
+        if (data.ok) {
+          showToast("限流设置已保存");
+          loadAdminLimits();
+        } else {
+          showToast(data.message || "保存失败", true);
+        }
+      } catch (e) {
+        showToast("保存失败：" + e.message, true);
+      }
+    });
 
     /* 修改管理员密码 */
     $("pwdSave").addEventListener("click", async () => {

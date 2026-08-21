@@ -7,7 +7,7 @@
 ## 功能
 
 - **视频号解析**：粘贴 `https://weixin.qq.com/sph/...` 分享链接 → 标题、作者、封面、多清晰度直链
-- **语音转文字（ASR）**：解析后一键转写视频语音，走 SiliconFlow（默认 `TeleAI/TeleSpeechASR`，可切 `FunAudioLLM/SenseVoiceSmall`），结果按视频缓存不重复扣费
+- **语音转文字（ASR）**：解析后一键转写视频语音，走 SiliconFlow（生产在用免费的 `FunAudioLLM/SenseVoiceSmall`；代码默认 `TeleAI/TeleSpeechASR`，2026-08-21 起该模型在 SiliconFlow 侧持续 500 暂不可用），异步任务队列 + 按视频缓存不重复扣费
 - **YouTube 解析**：通过 yt-dlp 解析视频信息与清晰度（VPS 模式；下载中转默认关闭，`YT_DOWNLOAD_DISABLED` 开关）
 - **管理后台** `/admin`：密码认证 → 在线更新全站 Cookie、YouTube cookies、示例链接、广告位、修改密码
 - **统计页** `/stats`：解析量趋势、成功率、来源分布（数据来自 parse_logs）
@@ -58,11 +58,11 @@ SPH_ADMIN_PASSWORD="管理密码" node scripts/sph-dev-server.mjs
 ./scripts/deploy/deploy-vps.sh root@服务器IP your-domain.com
 ```
 
-脚本会自动：安装 Node 22+ 与 nginx → 创建 `/opt/sph` 与专用用户 → 生成随机 admin 密码 → 配置 systemd 开机自启 + nginx 反代。建议搭配 cron：
+脚本会自动：安装 Node 22+ 与 nginx → 创建 `/opt/sph` 与专用用户 → 生成随机 admin 密码 → 配置 systemd 开机自启 + nginx 反代。建议搭配 cron（生产实际使用）：
 
 ```cron
-0 8 * * * node /opt/sph/scripts/wasm-monitor.mjs >> /var/log/sph-wasm-monitor.log 2>&1
-30 3 * * * /opt/sph/scripts/update-ytdlp.sh
+0 8 * * * node /opt/sph/scripts/wasm-monitor.mjs >> /opt/sph/data/wasm-monitor.log 2>&1
+0 6 * * * sudo bash /opt/sph/scripts/update-ytdlp.sh
 ```
 
 ## Cloudflare Worker 部署

@@ -103,6 +103,11 @@ export default {
       return handleExamples(request, env);
     }
 
+    // GET /api/features —— 功能开关状态（前端据此隐藏已屏蔽功能）
+    if (url.pathname === "/api/features" && request.method === "GET") {
+      return handleFeatures();
+    }
+
     // GET/POST /api/admin/examples —— 示例链接管理（需 Bearer token）
     if (url.pathname === "/api/admin/examples" && (request.method === "GET" || request.method === "POST")) {
       return handleAdminExamples(request, env);
@@ -120,7 +125,32 @@ export default {
 
     // POST /api/asr —— 视频号视频语音转文字（SiliconFlow）
     if (url.pathname === "/api/asr" && request.method === "POST") {
-      return handleAsr(request, env);
+      return handleAsr(request, env, ctx);
+    }
+
+    // GET /api/asr/status —— 轮询异步转写任务状态
+    if (url.pathname === "/api/asr/status" && request.method === "GET") {
+      return handleAsrStatus(request, env);
+    }
+
+    // GET/POST /mcp —— MCP server 端点（Streamable HTTP 无状态；GET 返回能力信息）
+    if (url.pathname === "/mcp" && (request.method === "POST" || request.method === "GET")) {
+      return handleMcp(request, env, ctx);
+    }
+
+    // GET/POST /api/admin/mcp_config —— MCP 开关与令牌管理（需 Bearer token）
+    if (url.pathname === "/api/admin/mcp_config" && (request.method === "GET" || request.method === "POST")) {
+      return handleAdminMcpConfig(request, env);
+    }
+
+    // POST /api/admin/mcp_test —— 协议自检（需 Bearer token）
+    if (url.pathname === "/api/admin/mcp_test" && request.method === "POST") {
+      return handleAdminMcpTest(request, env);
+    }
+
+    // GET/POST /api/admin/limits —— 限流参数管理（需 Bearer token）
+    if (url.pathname === "/api/admin/limits" && (request.method === "GET" || request.method === "POST")) {
+      return handleAdminLimits(request, env);
     }
 
     // GET/POST /api/admin/asr_config —— ASR key/模型管理（需 Bearer token）
@@ -137,6 +167,16 @@ export default {
     return new Response("not found", { status: 404 });
   },
 };
+
+// ---- 功能开关 ----
+// 暂时屏蔽的功能（成本控制/维护期间）；恢复时改为 false 即可，前端与 MCP 工具列表自动跟随
+const YT_DISABLED = true;   // YouTube 解析/下载整体屏蔽
+const ASR_DISABLED = false; // ASR 语音转文字屏蔽（MCP 匿名调用另限 5 分钟内视频）
+
+// GET /api/features —— 前端按此隐藏已屏蔽功能的入口
+function handleFeatures() {
+  return json({ ok: true, youtube: !YT_DISABLED, asr: !ASR_DISABLED });
+}
 
 function corsHeaders() {
   return {
@@ -369,11 +409,35 @@ async function handleYtInfo(request, env) {
   const shareUrl = new URL(request.url).searchParams.get("url") || "";
   let ok = 0, error = "", exportId = "", author = "", title = "";
   try {
+    if (YT_DISABLED) {
+      return json({ ok: false, error: "YouTube 功能暂时停用（维护中）" });
+    }
     if (ytNotAvailable(env)) {
       return json({ ok: false, error: "当前部署不支持 YouTube（需 VPS + yt-dlp）" });
     }
     if (!isYtUrl(shareUrl)) {
       return json({ ok: false, error: "仅支持 YouTube 链接" });
+    }
+    const { dailyLimit } = await resolveLimits(env);
+    const limit = await checkDailyParseLimit(request, env, "rate", dailyLimit);
+    if (!limit.allowed) {
+      logParse(env, {
+        ts: Math.floor(startedAt / 1000),
+        ip: clientIp(request),
+        ua: request.headers.get("user-agent") || "",
+        referer: request.headers.get("referer") || "",
+        shareUrl,
+        exportId: "",
+        author: "",
+        description: "",
+        videoUrl: "",
+        ok: 0,
+        error: "rate_limited",
+        durationMs: Date.now() - startedAt,
+        cookieSource: "yt",
+        platform: "yt",
+      });
+      return json({ ok: false, error: limitMessage(limit.used, dailyLimit, false), dailyRemaining: 0 });
     }
       const info = await env.YT.getInfo(shareUrl);
       ok = 1;
@@ -396,7 +460,7 @@ async function handleYtInfo(request, env) {
       cookieSource: "yt",
       platform: "yt",
     });
-    return json({ ok: true, downloadEnabled: !YT_DOWNLOAD_DISABLED, ...info });
+    return json({ ok: true, downloadEnabled: !YT_DOWNLOAD_DISABLED, dailyRemaining: limit.remaining, ...info });
   } catch (err) {
     error = err.message.slice(0, 300);
     log("[handleYtInfo] error:", err.message);
@@ -423,7 +487,7 @@ async function handleYtInfo(request, env) {
 
 async function handleYtDownload(request, env) {
   try {
-    if (YT_DOWNLOAD_DISABLED) {
+    if (YT_DISABLED || YT_DOWNLOAD_DISABLED) {
       return json({ ok: false, error: "下载功能暂时停用（维护中），解析功能不受影响" });
     }
     if (ytNotAvailable(env)) {
@@ -564,33 +628,59 @@ async function transcribeViaSiliconFlow(bytes, filename, apiKey, model) {
   return (result && result.text) || "";
 }
 
-async function handleAsr(request, env) {
-  const startedAt = Date.now();
-  let videoUrl = "";
+// ---- ASR 结果缓存（KV + LRU 索引，上限默认 100 条，admin 可在线调整） ----
+// 索引键 asr:index 存 [{k: cacheKey, t: 最后访问时间}]，超出上限淘汰最久未用
+const DEFAULT_ASR_CACHE_MAX = 100;
+const ASR_CACHE_INDEX_KEY = "asr:index";
+// 匿名（无令牌）MCP 调用 ASR 的时长上限默认值：5 分钟（admin 可在线调整，KV anon_asr_minutes）
+const DEFAULT_ANON_ASR_MINUTES = 5;
+
+async function asrCacheReadIndex(env) {
   try {
-    const body = await request.json();
-    videoUrl = body && typeof body.url === "string" ? body.url.trim() : "";
-    const exportId = body && typeof body.exportId === "string" ? body.exportId.trim() : "";
-    // 前端拿不到 exportId 时用分享链接做缓存键（同一视频直链每次解析都会变，分享链接稳定）
-    const shareUrl = body && typeof body.shareUrl === "string" ? body.shareUrl.trim() : "";
-    if (!/^https?:\/\//i.test(videoUrl)) {
-      return json({ ok: false, reason: "bad_request", error: "url 参数不合法" }, 400);
-    }
-    const { apiKey, model } = await resolveAsrConfig(env);
-    if (!apiKey) {
-      return json({ ok: false, reason: "no_key", error: "未配置 ASR API key（管理员可在 /admin 设置，或部署时注入 SILICONFLOW_API_KEY）" });
-    }
+    const idx = JSON.parse((await env.COOKIE_KV.get(ASR_CACHE_INDEX_KEY)) || "[]");
+    return Array.isArray(idx) ? idx : [];
+  } catch (_) {
+    return [];
+  }
+}
 
-    // 缓存：同一视频不重复扣费
-    const cacheId = exportId || shareUrl || (await sha256Hex(videoUrl));
-    const cacheKey = `asr:${model}:${cacheId}`;
-    if (env.COOKIE_KV && env.COOKIE_KV.get) {
-      const cached = await env.COOKIE_KV.get(cacheKey);
-      if (cached) {
-        return json({ ok: true, text: cached, model, cached: true });
-      }
-    }
+async function asrCacheGet(env, key) {
+  if (!env.COOKIE_KV || !env.COOKIE_KV.get) return null;
+  const text = await env.COOKIE_KV.get(key);
+  if (text == null) return null;
+  // touch：更新访问时间（旧缓存条目首次命中时补登索引）
+  if (env.COOKIE_KV.put) {
+    const idx = await asrCacheReadIndex(env);
+    const entry = idx.find((x) => x.k === key);
+    if (entry) entry.t = Date.now();
+    else idx.push({ k: key, t: Date.now() });
+    await env.COOKIE_KV.put(ASR_CACHE_INDEX_KEY, JSON.stringify(idx));
+  }
+  return text;
+}
 
+async function asrCachePut(env, key, text) {
+  if (!env.COOKIE_KV || !env.COOKIE_KV.put) return;
+  await env.COOKIE_KV.put(key, text);
+  const { asrCacheMax } = await resolveLimits(env);
+  let idx = await asrCacheReadIndex(env);
+  idx = idx.filter((x) => x.k !== key);
+  idx.push({ k: key, t: Date.now() });
+  while (idx.length > asrCacheMax) {
+    const oldest = idx.reduce((a, b) => (a.t <= b.t ? a : b));
+    idx = idx.filter((x) => x !== oldest);
+    await env.COOKIE_KV.delete(oldest.k);
+    await env.COOKIE_KV.delete(`asrjob:${oldest.k}`);
+  }
+  await env.COOKIE_KV.put(ASR_CACHE_INDEX_KEY, JSON.stringify(idx));
+}
+
+// 执行一次转写任务：取音频 → SiliconFlow → 写缓存与留痕。成功返回文本，失败抛错
+// VPS 部署有并发槽位（env.ASR.acquire/release）：全程持有，超出并发的任务在此排队等待
+async function runAsrJob(env, request, startedAt, { videoUrl, exportId, cacheKey, model, apiKey }) {
+  const hasSlots = env.ASR && typeof env.ASR.acquire === "function";
+  if (hasSlots) await env.ASR.acquire();
+  try {
     // 取音频：VPS 用 ffmpeg 抽取压缩音频；Worker 直接下载原视频（限 25MB）
     let bytes, filename;
     if (env.ASR && typeof env.ASR.prepareAudio === "function") {
@@ -601,19 +691,14 @@ async function handleAsr(request, env) {
       const resp = await fetch(videoUrl);
       if (!resp.ok) throw new Error(`下载视频失败: http ${resp.status}`);
       const size = Number(resp.headers.get("content-length") || 0);
-      if (size > ASR_MAX_BYTES) {
-        return json({ ok: false, reason: "too_large", error: "视频超过 25MB，当前部署无法转写（VPS 部署可通过 ffmpeg 压缩音频，不受此限）" });
-      }
+      if (size > ASR_MAX_BYTES) throw new Error("视频超过 25MB，当前部署无法转写（VPS 部署可通过 ffmpeg 压缩音频，不受此限）");
       bytes = await resp.arrayBuffer();
-      if (bytes.byteLength > ASR_MAX_BYTES) {
-        return json({ ok: false, reason: "too_large", error: "视频超过 25MB，当前部署无法转写（VPS 部署可通过 ffmpeg 压缩音频，不受此限）" });
-      }
+      if (bytes.byteLength > ASR_MAX_BYTES) throw new Error("视频超过 25MB，当前部署无法转写（VPS 部署可通过 ffmpeg 压缩音频，不受此限）");
       filename = "video.mp4";
     }
-
     const text = await transcribeViaSiliconFlow(bytes, filename, apiKey, model);
-    if (env.COOKIE_KV && env.COOKIE_KV.put && text) {
-      await env.COOKIE_KV.put(cacheKey, text);
+    if (text) {
+      await asrCachePut(env, cacheKey, text);
     }
     logParse(env, {
       ts: Math.floor(startedAt / 1000),
@@ -631,9 +716,9 @@ async function handleAsr(request, env) {
       cookieSource: "asr",
       platform: "sph",
     });
-    return json({ ok: true, text, model, cached: false });
+    return text;
   } catch (err) {
-    log("[handleAsr] error:", err.message);
+    log("[runAsrJob] error:", err.message);
     logParse(env, {
       ts: Math.floor(startedAt / 1000),
       ip: clientIp(request),
@@ -650,7 +735,504 @@ async function handleAsr(request, env) {
       cookieSource: "asr",
       platform: "sph",
     });
+    throw err;
+  } finally {
+    if (hasSlots) env.ASR.release();
+  }
+}
+
+// 发起一次转写：缓存命中直接返回文本；否则入队异步任务（或无 KV 时同步执行）
+// 返回 { text, model, cached } 或 { pending, jobId }；配置缺失/参数错误抛错
+async function asrStart(env, request, ctx, { videoUrl, exportId, shareUrl }) {
+  const { apiKey, model } = await resolveAsrConfig(env);
+  if (!apiKey) {
+    throw new Error("未配置 ASR API key（管理员可在 /admin 设置，或部署时注入 SILICONFLOW_API_KEY）");
+  }
+  // 前端拿不到 exportId 时用分享链接做缓存键（同一视频直链每次解析都会变，分享链接稳定）
+  const cacheId = exportId || shareUrl || (await sha256Hex(videoUrl));
+  const cacheKey = `asr:${model}:${cacheId}`;
+  const cached = await asrCacheGet(env, cacheKey);
+  if (cached != null) return { text: cached, model, cached: true };
+
+  // 无 KV 的极简部署：保持同步行为（长视频可能被代理超时截断）
+  if (!env.COOKIE_KV || !env.COOKIE_KV.put) {
+    const text = await runAsrJob(env, request, Date.now(), { videoUrl, exportId, cacheKey, model, apiKey });
+    return { text, model, cached: false };
+  }
+
+  // 异步任务：长视频转写可能超过 Cloudflare ~100s 代理超时，改后台执行 + 轮询
+  // jobKey 由缓存键派生：同一视频的并发请求共享同一个任务，不重复扣费
+  const jobKey = `asrjob:${cacheKey}`;
+  const jobRaw = await env.COOKIE_KV.get(jobKey);
+  if (jobRaw) {
+    let job = {};
+    try { job = JSON.parse(jobRaw); } catch (_) { /* 损坏则重建 */ }
+    if (job.status === "pending") {
+      return { pending: true, jobId: encodeURIComponent(jobKey) };
+    }
+    // done 但缓存缺失（异常）或 error：清掉重来
+    await env.COOKIE_KV.delete(jobKey);
+  }
+  await env.COOKIE_KV.put(jobKey, JSON.stringify({ status: "pending", startedAt: Date.now() }), { expirationTtl: 3600 });
+  const run = runAsrJob(env, request, Date.now(), { videoUrl, exportId, cacheKey, model, apiKey })
+    .then(() => env.COOKIE_KV.put(jobKey, JSON.stringify({ status: "done" }), { expirationTtl: 3600 }))
+    .catch((err) =>
+      env.COOKIE_KV.put(jobKey, JSON.stringify({ status: "error", error: err.message.slice(0, 300) }), { expirationTtl: 3600 })
+    )
+    .catch((e) => log("[asrStart] job persist error:", e.message));
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(run);
+  }
+  return { pending: true, jobId: encodeURIComponent(jobKey) };
+}
+
+async function handleAsr(request, env, ctx) {
+  try {
+    if (ASR_DISABLED) {
+      return json({ ok: false, reason: "disabled", error: "语音转文字暂时停用（维护中）" });
+    }
+    const body = await request.json();
+    const videoUrl = body && typeof body.url === "string" ? body.url.trim() : "";
+    const exportId = body && typeof body.exportId === "string" ? body.exportId.trim() : "";
+    const shareUrl = body && typeof body.shareUrl === "string" ? body.shareUrl.trim() : "";
+    if (!/^https?:\/\//i.test(videoUrl)) {
+      return json({ ok: false, reason: "bad_request", error: "url 参数不合法" }, 400);
+    }
+    const r = await asrStart(env, request, ctx, { videoUrl, exportId, shareUrl });
+    if (r.pending) {
+      return json({ ok: true, pending: true, jobId: r.jobId });
+    }
+    return json({ ok: true, text: r.text, model: r.model, cached: r.cached });
+  } catch (err) {
+    log("[handleAsr] error:", err.message);
     return json({ ok: false, reason: "error", error: err.message.slice(0, 300) });
+  }
+}
+
+// GET /api/asr/status?jobId= —— 轮询转写任务状态
+async function handleAsrStatus(request, env) {
+  if (!env.COOKIE_KV || !env.COOKIE_KV.get) {
+    return json({ ok: false, error: "当前部署不支持异步转写" });
+  }
+  const jobKey = decodeURIComponent(new URL(request.url).searchParams.get("jobId") || "");
+  if (!jobKey.startsWith("asrjob:asr:")) {
+    return json({ ok: false, error: "jobId 不合法" }, 400);
+  }
+  const raw = await env.COOKIE_KV.get(jobKey);
+  if (!raw) {
+    return json({ ok: false, error: "任务不存在或已过期，请重新发起转写" });
+  }
+  let job = {};
+  try { job = JSON.parse(raw); } catch (_) { /* 按 pending 处理 */ }
+  if (job.status === "done") {
+    const text = await asrCacheGet(env, jobKey.slice("asrjob:".length));
+    if (text != null) {
+      return json({ ok: true, status: "done", text, cached: true });
+    }
+    return json({ ok: false, error: "转写结果已过期，请重新发起转写" });
+  }
+  if (job.status === "error") {
+    return json({ ok: true, status: "error", error: job.error || "转写失败" });
+  }
+  return json({ ok: true, status: "pending" });
+}
+
+// ---- MCP server（Streamable HTTP 无状态模式） ----
+// 把站点解析/转写能力暴露给 AI 客户端。admin 页配置开关与访问令牌（KV）。
+// 注意：MCP 调用已用令牌认证，不再计入 IP 每日限流。
+
+const MCP_PROTOCOL_VERSION = "2025-03-26";
+const MCP_SERVER_INFO = { name: "sph-probe", version: "1.0.0" };
+
+const MCP_TOOLS = [
+  {
+    name: "parse_channels_video",
+    description:
+      "解析微信视频号分享链接，返回作者、简介、视频下载直链（h264/h265）。只做信息解析；除非用户明确要求转文字，否则不要继续调用 transcribe_video",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "视频号分享链接，如 https://weixin.qq.com/sph/xxxx" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "parse_youtube_video",
+    description: "解析 YouTube 视频信息：标题、时长、作者、清晰度选项。仅 VPS（yt-dlp）部署可用",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "YouTube 视频链接" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "transcribe_video",
+    description:
+      `【仅在用户明确要求语音转文字/转写/字幕时才调用，解析视频信息不需要调用它】视频语音转文字（ASR），消耗服务端付费额度。长视频为异步任务：返回 pending 时，稍后以相同参数再次调用（或用 get_transcription 按 shareUrl 查询）获取结果。匿名调用有时长上限（默认 5 分钟，管理员可调整）`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "视频直链（http/https）" },
+        shareUrl: { type: "string", description: "分享链接（可选，用作缓存键；直链每次解析会变）" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "get_transcription",
+    description:
+      "获取视频的语音转文字（ASR）结果：done（含文本）/ pending（转写中）/ not_found（需先调 transcribe_video）。结果缓存上限 100 条，LRU 淘汰",
+    inputSchema: {
+      type: "object",
+      properties: {
+        shareUrl: { type: "string", description: "分享链接（转写时使用的缓存键）" },
+        exportId: { type: "string", description: "视频 exportId（可选，优先于 shareUrl）" },
+      },
+    },
+  },
+];
+
+async function resolveMcpConfig(env) {
+  let enabled = false, token = "";
+  if (env.COOKIE_KV && env.COOKIE_KV.get) {
+    enabled = (await env.COOKIE_KV.get("mcp_enabled")) === "1";
+    token = (await env.COOKIE_KV.get("mcp_token")) || "";
+  }
+  return { enabled, token };
+}
+
+// 当前可用的 MCP 工具（屏蔽中的功能不出现在列表里）
+function mcpTools() {
+  const asrOff = ASR_DISABLED;
+  return MCP_TOOLS.filter(
+    (t) =>
+      !(t.name === "parse_youtube_video" && YT_DISABLED) &&
+      !(asrOff && (t.name === "transcribe_video" || t.name === "get_transcription"))
+  );
+}
+
+// 执行 MCP 工具调用，返回可 JSON 序列化的结果（失败抛错）
+// extra.anonymous：开放访问（无令牌）调用，ASR 限 5 分钟内视频
+async function mcpCallTool(name, args, env, request, ctx, extra = {}) {
+  if (name === "parse_youtube_video" && YT_DISABLED) throw new Error("YouTube 功能暂时停用（维护中）");
+  if ((name === "transcribe_video" || name === "get_transcription") && ASR_DISABLED) throw new Error("语音转文字暂时停用（维护中）");
+  if (name === "parse_channels_video") {
+    const shareUrl = String(args.url || "").trim();
+    if (!shareUrl) throw new Error("缺少 url 参数");
+    const startedAt = Date.now();
+    const cookieInfo = await resolveCookieInfo({}, env);
+    const { result, exportId } = await fetchVideoProfile(shareUrl, cookieInfo.value);
+    const fi = (result.data && result.data.feedInfo) || {};
+    const ai = (result.data && result.data.authorInfo) || {};
+    const videoUrl = (fi.h264VideoInfo && fi.h264VideoInfo.videoUrl) || (fi.h265VideoInfo && fi.h265VideoInfo.videoUrl) || fi.videoUrl || "";
+    logParse(env, {
+      ts: Math.floor(startedAt / 1000),
+      ip: clientIp(request),
+      ua: request.headers.get("user-agent") || "",
+      referer: "",
+      shareUrl,
+      exportId: exportId || "",
+      author: ai.nickname || "",
+      description: (fi.description || "").slice(0, 500),
+      videoUrl,
+      ok: 1,
+      error: "",
+      durationMs: Date.now() - startedAt,
+      cookieSource: "mcp",
+      platform: "sph",
+    });
+    return {
+      exportId,
+      author: ai.nickname || "",
+      authorAvatar: ai.headImgUrl || "",
+      description: fi.description || "",
+      videoUrl: {
+        default: videoUrl,
+        h264: (fi.h264VideoInfo && fi.h264VideoInfo.videoUrl) || "",
+        h265: (fi.h265VideoInfo && fi.h265VideoInfo.videoUrl) || "",
+      },
+    };
+  }
+  if (name === "parse_youtube_video") {
+    const shareUrl = String(args.url || "").trim();
+    if (ytNotAvailable(env)) throw new Error("当前部署不支持 YouTube（需 VPS + yt-dlp）");
+    if (!isYtUrl(shareUrl)) throw new Error("仅支持 YouTube 链接");
+    const startedAt = Date.now();
+    const info = await env.YT.getInfo(shareUrl);
+    logParse(env, {
+      ts: Math.floor(startedAt / 1000),
+      ip: clientIp(request),
+      ua: request.headers.get("user-agent") || "",
+      referer: "",
+      shareUrl,
+      exportId: "",
+      author: info.uploader || "",
+      description: (info.title || "").slice(0, 500),
+      videoUrl: info.thumbnail || "",
+      ok: 1,
+      error: "",
+      durationMs: Date.now() - startedAt,
+      cookieSource: "mcp",
+      platform: "yt",
+    });
+    return info;
+  }
+  if (name === "transcribe_video") {
+    const videoUrl = String(args.url || "").trim();
+    const shareUrl = String(args.shareUrl || "").trim();
+    if (!/^https?:\/\//i.test(videoUrl)) throw new Error("url 参数不合法（需视频直链）");
+    if (extra.anonymous) {
+      // 保护：匿名调用只放行 5 分钟内的视频。先查缓存——已转写过的直接返回，不卡时长
+      const { model } = await resolveAsrConfig(env);
+      const cacheKey = `asr:${model}:${shareUrl || (await sha256Hex(videoUrl))}`;
+      const cached = await asrCacheGet(env, cacheKey);
+      if (cached != null) return { status: "done", text: cached, cached: true };
+      let duration = -1;
+      if (env.ASR && typeof env.ASR.probeDuration === "function") {
+        try {
+          duration = await env.ASR.probeDuration(videoUrl);
+        } catch (e) {
+          log("[mcp] probeDuration error:", e.message);
+        }
+      }
+      const { anonAsrMinutes } = await resolveLimits(env);
+      if (duration < 0) {
+        throw new Error(`暂时无法确认视频时长，匿名调用暂只支持 ${anonAsrMinutes} 分钟内的视频～可联系站点管理员申请访问令牌`);
+      }
+      if (duration > anonAsrMinutes * 60) {
+        throw new Error(`该视频约 ${Math.round(duration / 60)} 分钟，超出匿名调用的 ${anonAsrMinutes} 分钟上限～可联系站点管理员申请访问令牌`);
+      }
+    }
+    const r = await asrStart(env, request, ctx, { videoUrl, exportId: "", shareUrl });
+    if (r.pending) {
+      return { status: "pending", message: "转写进行中（长视频可能需要几分钟）。请稍后以相同参数再次调用本工具，或用 get_transcription 查询结果。" };
+    }
+    return { status: "done", text: r.text, cached: r.cached };
+  }
+  if (name === "get_transcription") {
+    const shareUrl = String(args.shareUrl || "").trim();
+    const exportId = String(args.exportId || "").trim();
+    const cacheId = exportId || shareUrl;
+    if (!cacheId) throw new Error("需要 shareUrl 或 exportId 参数");
+    const { model } = await resolveAsrConfig(env);
+    const cacheKey = `asr:${model}:${cacheId}`;
+    const text = await asrCacheGet(env, cacheKey);
+    if (text != null) return { status: "done", text };
+    // 未命中缓存：看任务是否在进行/失败过
+    if (env.COOKIE_KV && env.COOKIE_KV.get) {
+      const raw = await env.COOKIE_KV.get(`asrjob:${cacheKey}`);
+      if (raw) {
+        let job = {};
+        try { job = JSON.parse(raw); } catch (_) { /* 按未知处理 */ }
+        if (job.status === "pending") return { status: "pending", message: "转写进行中，请稍后再查" };
+        if (job.status === "error") return { status: "error", error: job.error || "转写失败，可重新调用 transcribe_video" };
+      }
+    }
+    return { status: "not_found", message: "未找到该视频的转写结果，请先调用 transcribe_video 发起转写" };
+  }
+  throw new Error("未知工具: " + name);
+}
+
+// 处理单条 JSON-RPC 消息；notification（无 id）返回 null
+// extra.anonymous：开放访问（无令牌）调用
+async function mcpDispatch(msg, env, request, ctx, extra = {}) {
+  const { id, method, params } = msg || {};
+  if (id === undefined || id === null) return null; // notification，无需响应
+  if (method === "initialize") {
+    return {
+      jsonrpc: "2.0",
+      id,
+      result: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: MCP_SERVER_INFO,
+        instructions:
+          "视频号视频解析与语音转文字服务。解析视频信息用 parse_channels_video；transcribe_video 消耗付费额度，仅在用户明确要求转文字时才调用，不要主动转写。",
+      },
+    };
+  }
+  if (method === "ping") {
+    return { jsonrpc: "2.0", id, result: {} };
+  }
+  if (method === "tools/list") {
+    return { jsonrpc: "2.0", id, result: { tools: mcpTools() } };
+  }
+  if (method === "tools/call") {
+    const toolName = params && params.name;
+    const toolArgs = (params && params.arguments) || {};
+    try {
+      const out = await mcpCallTool(toolName, toolArgs, env, request, ctx, extra);
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] },
+      };
+    } catch (e) {
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: { content: [{ type: "text", text: e.message }], isError: true },
+      };
+    }
+  }
+  return { jsonrpc: "2.0", id, error: { code: -32601, message: "method not found: " + method } };
+}
+
+async function handleMcp(request, env, ctx) {
+  const { enabled, token } = await resolveMcpConfig(env);
+  if (!enabled) {
+    return json({ error: "MCP 服务未启用（管理员可在 /admin 开启）" }, 403);
+  }
+  if (token && bearerToken(request) !== token) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401,
+      headers: { ...corsHeaders(), "Content-Type": "application/json", "WWW-Authenticate": 'Bearer realm="mcp"' },
+    });
+  }
+  if (request.method === "GET") {
+    // 能力发现（部分客户端/人工排障用）
+    return json({
+      ...MCP_SERVER_INFO,
+      protocol: MCP_PROTOCOL_VERSION,
+      transport: "streamable-http (stateless, json responses)",
+      tools: mcpTools().map((t) => t.name),
+      auth: token ? "bearer" : "none",
+      rateLimit: token ? null : `tools/call ${(await resolveLimits(env)).dailyLimit} 次/天/IP`,
+    });
+  }
+  let msg;
+  try {
+    msg = await request.json();
+  } catch (_) {
+    return json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, 400);
+  }
+  // 空令牌 = 开放访问：tools/call 按源 IP 每天限 10 次（initialize/tools/list 握手不占额度）
+  // 正常调用不打扰；只在超限时提示已用次数
+  if (!token && msg && msg.method === "tools/call") {
+    const { dailyLimit } = await resolveLimits(env);
+    const limit = await checkDailyParseLimit(request, env, "ratemcp", dailyLimit);
+    if (!limit.allowed) {
+      return json({
+        jsonrpc: "2.0",
+        id: msg.id ?? null,
+        result: {
+          content: [{ type: "text", text: limitMessage(limit.used, dailyLimit, true) }],
+          isError: true,
+        },
+      });
+    }
+  }
+  const resp = await mcpDispatch(msg, env, request, ctx, { anonymous: !token });
+  if (resp === null) {
+    return new Response(null, { status: 202, headers: corsHeaders() });
+  }
+  return new Response(JSON.stringify(resp), {
+    headers: { ...corsHeaders(), "Content-Type": "application/json", "MCP-Protocol-Version": MCP_PROTOCOL_VERSION },
+  });
+}
+
+async function handleAdminMcpConfig(request, env) {
+  const denied = await requireAdmin(request, env);
+  if (denied) return denied;
+  if (!env.COOKIE_KV || !env.COOKIE_KV.put) {
+    return json({ ok: false, reason: "no_kv", message: "未绑定 KV，无法保存" });
+  }
+  if (request.method === "GET") {
+    const { enabled, token } = await resolveMcpConfig(env);
+    return json({ ok: true, enabled, configured: !!token, token, tools: mcpTools().map((t) => t.name) });
+  }
+  try {
+    const body = await request.json();
+    const enabled = !!body.enabled;
+    let token = typeof body.token === "string" ? body.token.trim() : "";
+    // 空令牌是合法模式（开放访问，按 IP 限流）；仅在明确要求时生成
+    if (!token && body.generateToken) {
+      token = [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+    await env.COOKIE_KV.put("mcp_enabled", enabled ? "1" : "0");
+    if (token) {
+      await env.COOKIE_KV.put("mcp_token", token);
+    } else if (body.clearToken) {
+      await env.COOKIE_KV.delete("mcp_token");
+    }
+    const cur = await resolveMcpConfig(env);
+    log("[admin] MCP", cur.enabled ? "已启用" : "已停用", ", token:", cur.token ? `已设置(长度${cur.token.length})` : "未设置");
+    return json({ ok: true, enabled: cur.enabled, configured: !!cur.token, token: cur.token, tools: mcpTools().map((t) => t.name) });
+  } catch (e) {
+    return json({ ok: false, reason: "error", message: e.message }, 500);
+  }
+}
+
+// 管理页「测试」：直接走一遍 initialize + tools/list，验证协议栈可用
+async function handleAdminMcpTest(request, env) {
+  const denied = await requireAdmin(request, env);
+  if (denied) return denied;
+  try {
+    const init = await mcpDispatch({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, env, request, {});
+    const list = await mcpDispatch({ jsonrpc: "2.0", id: 2, method: "tools/list" }, env, request, {});
+    if (!init.result || !list.result) throw new Error("协议响应异常");
+    const tools = list.result.tools || [];
+    const { enabled, token } = await resolveMcpConfig(env);
+    return json({
+      ok: true,
+      enabled,
+      configured: !!token,
+      protocol: init.result.protocolVersion,
+      serverInfo: init.result.serverInfo,
+      tools: tools.map((t) => t.name),
+      message: `协议正常，${tools.length} 个工具可用`,
+    });
+  } catch (e) {
+    return json({ ok: false, message: e.message }, 500);
+  }
+}
+
+// GET/POST /api/admin/limits —— 限流参数管理（需 Bearer token）
+async function handleAdminLimits(request, env) {
+  const denied = await requireAdmin(request, env);
+  if (denied) return denied;
+  if (request.method === "GET") {
+    const { dailyLimit, anonAsrMinutes, asrCacheMax } = await resolveLimits(env);
+    return json({
+      ok: true,
+      dailyLimit,
+      anonAsrMinutes,
+      asrCacheMax,
+      defaults: {
+        dailyLimit: DEFAULT_DAILY_PARSE_LIMIT,
+        anonAsrMinutes: DEFAULT_ANON_ASR_MINUTES,
+        asrCacheMax: DEFAULT_ASR_CACHE_MAX,
+      },
+      kv: !!(env.COOKIE_KV && env.COOKIE_KV.put),
+    });
+  }
+  if (!env.COOKIE_KV || !env.COOKIE_KV.put) {
+    return json({ ok: false, reason: "no_kv", message: "未绑定 KV，无法保存" });
+  }
+  try {
+    const body = await request.json();
+    const dailyLimit = Number(body.dailyLimit);
+    const anonAsrMinutes = Number(body.anonAsrMinutes);
+    const asrCacheMax = Number(body.asrCacheMax);
+    if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 1000) {
+      return json({ ok: false, reason: "bad_request", message: "每日次数上限需为 1-1000 的整数" }, 400);
+    }
+    if (!Number.isInteger(anonAsrMinutes) || anonAsrMinutes < 1 || anonAsrMinutes > 120) {
+      return json({ ok: false, reason: "bad_request", message: "匿名 ASR 时长上限需为 1-120 的整数（分钟）" }, 400);
+    }
+    if (!Number.isInteger(asrCacheMax) || asrCacheMax < 10 || asrCacheMax > 10000) {
+      return json({ ok: false, reason: "bad_request", message: "ASR 缓存条数上限需为 10-10000 的整数" }, 400);
+    }
+    await env.COOKIE_KV.put("daily_limit", String(dailyLimit));
+    await env.COOKIE_KV.put("anon_asr_minutes", String(anonAsrMinutes));
+    await env.COOKIE_KV.put("asr_cache_max", String(asrCacheMax));
+    log("[admin] 限流参数已更新: 每日", dailyLimit, "次, 匿名 ASR", anonAsrMinutes, "分钟, 缓存", asrCacheMax, "条");
+    return json({ ok: true, dailyLimit, anonAsrMinutes, asrCacheMax });
+  } catch (e) {
+    return json({ ok: false, reason: "error", message: e.message }, 500);
   }
 }
 
@@ -881,6 +1463,53 @@ function normalizeCookie(raw) {
 // 检查用的示例分享链接（仅用于验证 cookie 能否通过元宝认证）
 const CHECK_COOKIE_URL = "https://weixin.qq.com/sph/Axv548mzBF";
 
+// ---- 频率限制：同一 IP 每天解析次数上限（admin 可在线调整，KV daily_limit） ----
+
+const DEFAULT_DAILY_PARSE_LIMIT = 10;
+
+// 当前生效的限流参数：KV 在线设置优先，回退默认值
+async function resolveLimits(env) {
+  let dailyLimit = DEFAULT_DAILY_PARSE_LIMIT;
+  let anonAsrMinutes = DEFAULT_ANON_ASR_MINUTES;
+  let asrCacheMax = DEFAULT_ASR_CACHE_MAX;
+  if (env.COOKIE_KV && env.COOKIE_KV.get) {
+    const d = Number(await env.COOKIE_KV.get("daily_limit"));
+    if (Number.isInteger(d) && d > 0) dailyLimit = d;
+    const m = Number(await env.COOKIE_KV.get("anon_asr_minutes"));
+    if (Number.isInteger(m) && m > 0) anonAsrMinutes = m;
+    const c = Number(await env.COOKIE_KV.get("asr_cache_max"));
+    if (Number.isInteger(c) && c > 0) asrCacheMax = c;
+  }
+  return { dailyLimit, anonAsrMinutes, asrCacheMax };
+}
+
+// 按日计数（东八区，与统计页一致）。返回 { allowed, used, remaining }
+// KV 未绑定时放行（极简部署）；携带有效管理员 token 的请求不受限
+// scope 区分额度池：网页解析（rate）与 MCP 开放访问（ratemcp）互相独立
+async function checkDailyParseLimit(request, env, scope = "rate", limit = DEFAULT_DAILY_PARSE_LIMIT) {
+  if (!env.COOKIE_KV || !env.COOKIE_KV.get) return { allowed: true, used: 0, remaining: -1 };
+  const pwd = await resolveAdminPassword(env);
+  if (pwd && (await verifyAdminToken(pwd, bearerToken(request)))) {
+    return { allowed: true, used: 0, remaining: -1 };
+  }
+  const ip = clientIp(request) || "unknown";
+  const day = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  const key = `${scope}:${day}:${ip}`;
+  const count = Number((await env.COOKIE_KV.get(key)) || 0);
+  if (count >= limit) {
+    return { allowed: false, used: count, remaining: 0 };
+  }
+  // 48h 过期：跨天后旧键自动清理（dev server 的文件 KV 忽略过期，键量小可接受）
+  await env.COOKIE_KV.put(key, String(count + 1), { expirationTtl: 172800 });
+  return { allowed: true, used: count + 1, remaining: limit - count - 1 };
+}
+
+// 委婉的超限提示：告知已用次数；MCP 调用者额外提示可申请令牌
+function limitMessage(used, limit, forMcp) {
+  const base = `今天的免费次数已经用完啦（今天已用 ${used}/${limit} 次），明天再来吧～`;
+  return forMcp ? `${base}如需更高额度，可联系站点管理员申请访问令牌。` : base;
+}
+
 function clientIp(request) {
   return (
     request.headers.get("cf-connecting-ip") ||
@@ -911,6 +1540,26 @@ async function handleFetchVideoProfile(request, env) {
     if (!shareUrl) {
       return json({ error: "missing url" }, 400);
     }
+    const { dailyLimit } = await resolveLimits(env);
+    const limit = await checkDailyParseLimit(request, env, "rate", dailyLimit);
+    if (!limit.allowed) {
+      logParse(env, {
+        ts: Math.floor(startedAt / 1000),
+        ip: clientIp(request),
+        ua: request.headers.get("user-agent") || "",
+        referer: request.headers.get("referer") || "",
+        shareUrl,
+        exportId: "",
+        author: "",
+        description: "",
+        videoUrl: "",
+        ok: 0,
+        error: "rate_limited",
+        durationMs: Date.now() - startedAt,
+        cookieSource: "",
+      });
+      return json({ error: limitMessage(limit.used, dailyLimit, false), dailyRemaining: 0 });
+    }
     const cookieInfo = await resolveCookieInfo(body, env);
     cookieSource = cookieInfo.source;
     const { result, exportId } = await fetchVideoProfile(shareUrl, cookieInfo.value);
@@ -931,7 +1580,7 @@ async function handleFetchVideoProfile(request, env) {
       durationMs: Date.now() - startedAt,
       cookieSource,
     });
-    return json(result);
+    return json({ ...result, dailyRemaining: limit.remaining });
   } catch (err) {
     log("[handleFetchVideoProfile] error:", err.message);
     logParse(env, {

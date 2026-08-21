@@ -346,6 +346,34 @@ const yt = {
 };
 
 // ============ ASR 支持（ffmpeg 抽音频 → worker 上传 SiliconFlow） ============
+// 并发信号量：转写任务吃 CPU（ffmpeg）和内存（整段音频进 Buffer），
+// 不限并发会把小 VPS 打垮。默认最多 2 个并发，其余排队（任务状态保持 pending，
+// 调用方轮询等待，用时间换空间）。SPH_ASR_MAX_CONCURRENT 可调。
+const ASR_MAX_CONCURRENT = Number(process.env.SPH_ASR_MAX_CONCURRENT || 2);
+let asrActive = 0;
+const asrWaiters = [];
+
+function asrAcquire() {
+  return new Promise((resolve) => {
+    if (asrActive < ASR_MAX_CONCURRENT) {
+      asrActive++;
+      resolve();
+    } else {
+      asrWaiters.push(resolve);
+      console.log(`[asr] 并发已满(${ASR_MAX_CONCURRENT})，任务排队，当前队列 ${asrWaiters.length} 个`);
+    }
+  });
+}
+function asrRelease() {
+  asrActive--;
+  const next = asrWaiters.shift();
+  if (next) {
+    asrActive++;
+    console.log(`[asr] 队列中任务开始执行，剩余队列 ${asrWaiters.length} 个`);
+    next();
+  }
+}
+
 // ffmpeg 路径：与 yt-dlp 一致优先 /usr/bin，回退 PATH
 const ffmpegBin = existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : "ffmpeg";
 const asrTmpDir = join(root, "data", "tmp");
@@ -390,6 +418,36 @@ const asr = {
       rmSync(audioPath, { force: true });
     }
   },
+
+  // ffprobe 探测远程视频时长（秒），失败抛错。用于匿名 MCP 调用的时长上限
+  async probeDuration(url) {
+    const ffprobeBin = existsSync("/usr/bin/ffprobe") ? "/usr/bin/ffprobe" : "ffprobe";
+    const out = await new Promise((resolve, reject) => {
+      const child = spawn(ffprobeBin, ["-v", "error", "-show_entries", "format=duration", "-of", "json", url], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", (c) => (stdout += c));
+      child.stderr.on("data", (c) => (stderr += c));
+      child.on("error", (e) => reject(new Error("ffprobe 不可用: " + e.message)));
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error("ffprobe 探测超时"));
+      }, 30000);
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (code === 0 && stdout) resolve(stdout);
+        else reject(new Error("ffprobe 失败: " + (stderr.slice(-120) || `退出码 ${code}`)));
+      });
+    });
+    const duration = Number((JSON.parse(out).format || {}).duration);
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error("无法解析视频时长");
+    return duration;
+  },
+
+  // 并发槽位（worker 的转写任务在下载+转码+上传全程持有）
+  acquire: asrAcquire,
+  release: asrRelease,
 };
 
 const dbEnv = {
@@ -589,7 +647,12 @@ const server = createServer(async (req, res) => {
         YT: yt,
         ASR: asr,
       },
-      {}
+      {
+        // 后台任务（如 ASR 异步转写）：进程常驻，浮动 Promise 即可，这里只负责记录失败
+        waitUntil(p) {
+          Promise.resolve(p).catch((e) => console.error("[waitUntil] 后台任务失败:", e));
+        },
+      }
     );
     res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
     if (response.body) {
@@ -621,7 +684,7 @@ server.listen(port, host, () => {
   }
   console.log(`cookie: ${cookie ? "已配置 (SPH_COOKIE)" : "未配置 —— 解析接口将报错，仅可测试页面/错误提示"}`);
   console.log(`admin: ${adminPassword ? "已配置 (SPH_ADMIN_PASSWORD)，入口 /admin" : "未配置 —— /admin 不可用"}`);
-  console.log(`ASR: ${siliconflowApiKey ? "已配置 (SILICONFLOW_API_KEY)" : "未配置 —— 可在 /admin 在线设置 key"}，ffmpeg 抽取音频（${ffmpegBin}）`);
+  console.log(`ASR: ${siliconflowApiKey ? "已配置 (SILICONFLOW_API_KEY)" : "未配置 —— 可在 /admin 在线设置 key"}，ffmpeg 抽取音频（${ffmpegBin}），并发上限 ${ASR_MAX_CONCURRENT}`);
   console.log(`KV: 文件持久化 @ ${kvPath}（COOKIE_KV，含在线修改的密码）`);
   console.log(`DB: SQLite @ ${dbPath}（解析留痕 / 示例链接 / 广告位，SPH_DB 可改路径）`);
   console.log("修改 internal/api/sph/ 下文件后直接刷新浏览器即可。");
