@@ -153,6 +153,16 @@ export default {
       return handleAdminLimits(request, env);
     }
 
+    // GET /api/me —— 当前登录用户信息（前端用 4A token 换取身份与剩余额度）
+    if (url.pathname === "/api/me" && request.method === "GET") {
+      return handleMe(request, env);
+    }
+
+    // GET /api/login_config —— 登录体系配置（前端据此显示/隐藏登录入口）
+    if (url.pathname === "/api/login_config" && request.method === "GET") {
+      return json({ ok: true, enabled: !!authVerifyUrl(env), loginUrl: LOGIN_PAGE_URL });
+    }
+
     // GET/POST /api/admin/asr_config —— ASR key/模型管理（需 Bearer token）
     if (url.pathname === "/api/admin/asr_config" && (request.method === "GET" || request.method === "POST")) {
       return handleAdminAsrConfig(request, env);
@@ -418,8 +428,8 @@ async function handleYtInfo(request, env) {
     if (!isYtUrl(shareUrl)) {
       return json({ ok: false, error: "仅支持 YouTube 链接" });
     }
-    const { dailyLimit } = await resolveLimits(env);
-    const limit = await checkDailyParseLimit(request, env, "rate", dailyLimit);
+    const ident = await resolveIdentity(env, request);
+    const limit = await checkDailyParseLimit(request, env, "rate", ident.dailyLimit, ident.ident);
     if (!limit.allowed) {
       logParse(env, {
         ts: Math.floor(startedAt / 1000),
@@ -437,7 +447,7 @@ async function handleYtInfo(request, env) {
         cookieSource: "yt",
         platform: "yt",
       });
-      return json({ ok: false, error: limitMessage(limit.used, dailyLimit, false), dailyRemaining: 0 });
+      return json({ ok: false, error: limitMessage(limit.used, ident.dailyLimit, false), dailyRemaining: 0 });
     }
       const info = await env.YT.getInfo(shareUrl);
       ok = 1;
@@ -460,7 +470,7 @@ async function handleYtInfo(request, env) {
       cookieSource: "yt",
       platform: "yt",
     });
-    return json({ ok: true, downloadEnabled: !YT_DOWNLOAD_DISABLED, dailyRemaining: limit.remaining, ...info });
+    return json({ ok: true, downloadEnabled: !YT_DOWNLOAD_DISABLED, dailyRemaining: limit.remaining, authed: ident.isUser, ...info });
   } catch (err) {
     error = err.message.slice(0, 300);
     log("[handleYtInfo] error:", err.message);
@@ -915,7 +925,7 @@ function mcpTools() {
 }
 
 // 执行 MCP 工具调用，返回可 JSON 序列化的结果（失败抛错）
-// extra.anonymous：开放访问（无令牌）调用，ASR 限 5 分钟内视频
+// extra.anonymous：开放访问（无令牌且未登录 4A）调用，ASR 限 5 分钟内视频
 async function mcpCallTool(name, args, env, request, ctx, extra = {}) {
   if (name === "parse_youtube_video" && YT_DISABLED) throw new Error("YouTube 功能暂时停用（维护中）");
   if ((name === "transcribe_video" || name === "get_transcription") && ASR_DISABLED) throw new Error("语音转文字暂时停用（维护中）");
@@ -985,7 +995,7 @@ async function mcpCallTool(name, args, env, request, ctx, extra = {}) {
     const shareUrl = String(args.shareUrl || "").trim();
     if (!/^https?:\/\//i.test(videoUrl)) throw new Error("url 参数不合法（需视频直链）");
     if (extra.anonymous) {
-      // 保护：匿名调用只放行 5 分钟内的视频。先查缓存——已转写过的直接返回，不卡时长
+      // 保护：匿名调用只放行 5 分钟内的视频（4A 登录用户不受此时长限制）。先查缓存——已转写过的直接返回，不卡时长
       const { model } = await resolveAsrConfig(env);
       const cacheKey = `asr:${model}:${shareUrl || (await sha256Hex(videoUrl))}`;
       const cached = await asrCacheGet(env, cacheKey);
@@ -1000,10 +1010,10 @@ async function mcpCallTool(name, args, env, request, ctx, extra = {}) {
       }
       const { anonAsrMinutes } = await resolveLimits(env);
       if (duration < 0) {
-        throw new Error(`暂时无法确认视频时长，匿名调用暂只支持 ${anonAsrMinutes} 分钟内的视频～可联系站点管理员申请访问令牌`);
+        throw new Error(`暂时无法确认视频时长，匿名调用暂只支持 ${anonAsrMinutes} 分钟内的视频～可登录账号或联系站点管理员申请访问令牌`);
       }
       if (duration > anonAsrMinutes * 60) {
-        throw new Error(`该视频约 ${Math.round(duration / 60)} 分钟，超出匿名调用的 ${anonAsrMinutes} 分钟上限～可联系站点管理员申请访问令牌`);
+        throw new Error(`该视频约 ${Math.round(duration / 60)} 分钟，超出匿名调用的 ${anonAsrMinutes} 分钟上限～可登录账号或联系站点管理员申请访问令牌`);
       }
     }
     const r = await asrStart(env, request, ctx, { videoUrl, exportId: "", shareUrl });
@@ -1100,9 +1110,12 @@ async function handleMcp(request, env, ctx) {
       transport: "streamable-http (stateless, json responses)",
       tools: mcpTools().map((t) => t.name),
       auth: token ? "bearer" : "none",
+      login: authVerifyUrl(env) ? "4A (smartbid.site)" : "disabled",
       rateLimit: token ? null : `tools/call ${(await resolveLimits(env)).dailyLimit} 次/天/IP`,
     });
   }
+  // 4A 登录态识别：携带有效 4A token 的 MCP 调用也计入该用户的独立额度池
+  const authUser = await resolveAuthUser(request, env);
   let msg;
   try {
     msg = await request.json();
@@ -1110,22 +1123,24 @@ async function handleMcp(request, env, ctx) {
     return json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, 400);
   }
   // 空令牌 = 开放访问：tools/call 按源 IP 每天限 10 次（initialize/tools/list 握手不占额度）
-  // 正常调用不打扰；只在超限时提示已用次数
+  // 正常调用不打扰；只在超限时提示已用次数。4A 登录用户按用户身份计数（独立、更大额度）
   if (!token && msg && msg.method === "tools/call") {
-    const { dailyLimit } = await resolveLimits(env);
-    const limit = await checkDailyParseLimit(request, env, "ratemcp", dailyLimit);
+    const ident = authUser
+      ? { ident: String(authUser.id), isUser: true, dailyLimit: (await resolveLimits(env)).userDailyLimit }
+      : { ident: "", isUser: false, dailyLimit: (await resolveLimits(env)).dailyLimit };
+    const limit = await checkDailyParseLimit(request, env, "ratemcp", ident.dailyLimit, ident.ident);
     if (!limit.allowed) {
       return json({
         jsonrpc: "2.0",
         id: msg.id ?? null,
         result: {
-          content: [{ type: "text", text: limitMessage(limit.used, dailyLimit, true) }],
+          content: [{ type: "text", text: limitMessage(limit.used, ident.dailyLimit, true) }],
           isError: true,
         },
       });
     }
   }
-  const resp = await mcpDispatch(msg, env, request, ctx, { anonymous: !token });
+  const resp = await mcpDispatch(msg, env, request, ctx, { anonymous: !token && !authUser });
   if (resp === null) {
     return new Response(null, { status: 202, headers: corsHeaders() });
   }
@@ -1195,14 +1210,16 @@ async function handleAdminLimits(request, env) {
   const denied = await requireAdmin(request, env);
   if (denied) return denied;
   if (request.method === "GET") {
-    const { dailyLimit, anonAsrMinutes, asrCacheMax } = await resolveLimits(env);
+    const { dailyLimit, userDailyLimit, anonAsrMinutes, asrCacheMax } = await resolveLimits(env);
     return json({
       ok: true,
       dailyLimit,
+      userDailyLimit,
       anonAsrMinutes,
       asrCacheMax,
       defaults: {
         dailyLimit: DEFAULT_DAILY_PARSE_LIMIT,
+        userDailyLimit: DEFAULT_DAILY_PARSE_LIMIT * DEFAULT_USER_DAILY_MULTIPLIER,
         anonAsrMinutes: DEFAULT_ANON_ASR_MINUTES,
         asrCacheMax: DEFAULT_ASR_CACHE_MAX,
       },
@@ -1215,10 +1232,14 @@ async function handleAdminLimits(request, env) {
   try {
     const body = await request.json();
     const dailyLimit = Number(body.dailyLimit);
+    const userDailyLimit = Number(body.userDailyLimit);
     const anonAsrMinutes = Number(body.anonAsrMinutes);
     const asrCacheMax = Number(body.asrCacheMax);
     if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 1000) {
       return json({ ok: false, reason: "bad_request", message: "每日次数上限需为 1-1000 的整数" }, 400);
+    }
+    if (!Number.isInteger(userDailyLimit) || userDailyLimit < 1 || userDailyLimit > 10000) {
+      return json({ ok: false, reason: "bad_request", message: "注册用户每日次数上限需为 1-10000 的整数" }, 400);
     }
     if (!Number.isInteger(anonAsrMinutes) || anonAsrMinutes < 1 || anonAsrMinutes > 120) {
       return json({ ok: false, reason: "bad_request", message: "匿名 ASR 时长上限需为 1-120 的整数（分钟）" }, 400);
@@ -1227,10 +1248,11 @@ async function handleAdminLimits(request, env) {
       return json({ ok: false, reason: "bad_request", message: "ASR 缓存条数上限需为 10-10000 的整数" }, 400);
     }
     await env.COOKIE_KV.put("daily_limit", String(dailyLimit));
+    await env.COOKIE_KV.put("user_daily_limit", String(userDailyLimit));
     await env.COOKIE_KV.put("anon_asr_minutes", String(anonAsrMinutes));
     await env.COOKIE_KV.put("asr_cache_max", String(asrCacheMax));
-    log("[admin] 限流参数已更新: 每日", dailyLimit, "次, 匿名 ASR", anonAsrMinutes, "分钟, 缓存", asrCacheMax, "条");
-    return json({ ok: true, dailyLimit, anonAsrMinutes, asrCacheMax });
+    log("[admin] 限流参数已更新: 每日", dailyLimit, "次, 注册用户每日", userDailyLimit, "次, 匿名 ASR", anonAsrMinutes, "分钟, 缓存", asrCacheMax, "条");
+    return json({ ok: true, dailyLimit, userDailyLimit, anonAsrMinutes, asrCacheMax });
   } catch (e) {
     return json({ ok: false, reason: "error", message: e.message }, 500);
   }
@@ -1466,35 +1488,42 @@ const CHECK_COOKIE_URL = "https://weixin.qq.com/sph/Axv548mzBF";
 // ---- 频率限制：同一 IP 每天解析次数上限（admin 可在线调整，KV daily_limit） ----
 
 const DEFAULT_DAILY_PARSE_LIMIT = 10;
+// 注册用户（4A 登录）每日解析次数上限默认值：匿名额度的 3 倍（admin 可在线调整，KV user_daily_limit）
+const DEFAULT_USER_DAILY_MULTIPLIER = 3;
 
 // 当前生效的限流参数：KV 在线设置优先，回退默认值
 async function resolveLimits(env) {
   let dailyLimit = DEFAULT_DAILY_PARSE_LIMIT;
+  let userDailyLimit = 0; // 0 = 跟随匿名额度 × USER_DAILY_MULTIPLIER
   let anonAsrMinutes = DEFAULT_ANON_ASR_MINUTES;
   let asrCacheMax = DEFAULT_ASR_CACHE_MAX;
   if (env.COOKIE_KV && env.COOKIE_KV.get) {
     const d = Number(await env.COOKIE_KV.get("daily_limit"));
     if (Number.isInteger(d) && d > 0) dailyLimit = d;
+    const u = Number(await env.COOKIE_KV.get("user_daily_limit"));
+    if (Number.isInteger(u) && u >= 0) userDailyLimit = u;
     const m = Number(await env.COOKIE_KV.get("anon_asr_minutes"));
     if (Number.isInteger(m) && m > 0) anonAsrMinutes = m;
     const c = Number(await env.COOKIE_KV.get("asr_cache_max"));
     if (Number.isInteger(c) && c > 0) asrCacheMax = c;
   }
-  return { dailyLimit, anonAsrMinutes, asrCacheMax };
+  if (!userDailyLimit) userDailyLimit = dailyLimit * DEFAULT_USER_DAILY_MULTIPLIER;
+  return { dailyLimit, userDailyLimit, anonAsrMinutes, asrCacheMax };
 }
 
 // 按日计数（东八区，与统计页一致）。返回 { allowed, used, remaining }
 // KV 未绑定时放行（极简部署）；携带有效管理员 token 的请求不受限
 // scope 区分额度池：网页解析（rate）与 MCP 开放访问（ratemcp）互相独立
-async function checkDailyParseLimit(request, env, scope = "rate", limit = DEFAULT_DAILY_PARSE_LIMIT) {
+// ident 为空按 IP 计数（匿名）；非空按用户身份计数（注册用户，独立额度池）
+async function checkDailyParseLimit(request, env, scope = "rate", limit = DEFAULT_DAILY_PARSE_LIMIT, ident = "") {
   if (!env.COOKIE_KV || !env.COOKIE_KV.get) return { allowed: true, used: 0, remaining: -1 };
   const pwd = await resolveAdminPassword(env);
   if (pwd && (await verifyAdminToken(pwd, bearerToken(request)))) {
     return { allowed: true, used: 0, remaining: -1 };
   }
-  const ip = clientIp(request) || "unknown";
+  const idKey = ident ? `u${ident}` : `ip${clientIp(request) || "unknown"}`;
   const day = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
-  const key = `${scope}:${day}:${ip}`;
+  const key = `${scope}:${day}:${idKey}`;
   const count = Number((await env.COOKIE_KV.get(key)) || 0);
   if (count >= limit) {
     return { allowed: false, used: count, remaining: 0 };
@@ -1508,6 +1537,89 @@ async function checkDailyParseLimit(request, env, scope = "rate", limit = DEFAUL
 function limitMessage(used, limit, forMcp) {
   const base = `今天的免费次数已经用完啦（今天已用 ${used}/${limit} 次），明天再来吧～`;
   return forMcp ? `${base}如需更高额度，可联系站点管理员申请访问令牌。` : base;
+}
+
+// ---- 4A 统一登录（*.smartbid.site 全家桶账号） ----
+// 前端持有 4A 下发的 sso_token，经 Authorization: Bearer 传给本服务；
+// 服务端调 4A verify 端点确认有效性并取数字 user.id 作为计费/限流身份。
+// 配置缺失（未设 AUTH_VERIFY_URL）时视为"登录体系未启用"，全部按匿名处理。
+
+const LOGIN_PAGE_URL = "https://auth.smartbid.site/login";
+// 4A verify 端点默认值（可用部署环境变量 AUTH_VERIFY_URL 覆盖，置空字符串可整体关闭登录体系）
+const AUTH_VERIFY_URL_DEFAULT = "https://auth.smartbid.site/api/auth/verify";
+
+// 跨请求缓存 verify 结果，减少对 4A 的调用（token 24h 有效，缓存 10 分钟足够）
+const AUTH_CACHE_TTL = 600;
+const authCache = new Map(); // token -> { user, exp }
+
+function authVerifyUrl(env) {
+  // 未配置时用默认端点；显式传空字符串视为关闭登录体系
+  if (typeof env.AUTH_VERIFY_URL === "string") return env.AUTH_VERIFY_URL;
+  return AUTH_VERIFY_URL_DEFAULT;
+}
+
+// 用 4A token 换取用户信息；无效/过期/未启用返回 null（不抛错——登录态缺失只是降级为匿名）
+async function resolveAuthUser(request, env) {
+  const token = bearerToken(request);
+  if (!token || !authVerifyUrl(env)) return null;
+  // 命中缓存直接返回（注意区分"确认无效"与"未缓存"）
+  const cached = authCache.get(token);
+  if (cached) return cached.exp > Date.now() / 1000 ? cached.user : null;
+  try {
+    const resp = await fetch(authVerifyUrl(env), {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) {
+      authCache.set(token, { user: null, exp: Date.now() / 1000 + 60 }); // 无效 token 短缓存，防刷
+      return null;
+    }
+    const user = await resp.json();
+    if (!user || !Number.isInteger(user.id) || user.id <= 0 || user.is_active === false) {
+      authCache.set(token, { user: null, exp: Date.now() / 1000 + 60 });
+      return null;
+    }
+    authCache.set(token, { user, exp: Date.now() / 1000 + AUTH_CACHE_TTL });
+    return user;
+  } catch (e) {
+    // 4A 不可达：宁可放行为匿名，也不阻断正常解析
+    log("[resolveAuthUser] verify error:", e.message);
+    return null;
+  }
+}
+
+// 本次请求的身份与额度池：登录用户走 user 池（独立于匿名 IP 池）
+// 返回 { ident, isUser, dailyLimit, limit } —— limit 是 checkDailyParseLimit 的结果（调用方再补查）
+async function resolveIdentity(env, request) {
+  const user = await resolveAuthUser(request, env);
+  const { dailyLimit, userDailyLimit } = await resolveLimits(env);
+  if (user) {
+    return { ident: String(user.id), isUser: true, dailyLimit: userDailyLimit };
+  }
+  return { ident: "", isUser: false, dailyLimit };
+}
+
+// GET /api/me —— 前端展示登录态与剩余额度；未登录返回 ok:false + 登录入口说明
+async function handleMe(request, env) {
+  const user = await resolveAuthUser(request, env);
+  if (!user) {
+    return json({ ok: false, anonymous: true, loginUrl: LOGIN_PAGE_URL });
+  }
+  const { userDailyLimit } = await resolveLimits(env);
+  // 只读查询：不消耗额度，构造一次假查（直接读当前计数）
+  const day = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  let used = 0;
+  if (env.COOKIE_KV && env.COOKIE_KV.get) {
+    used = Number((await env.COOKIE_KV.get(`rate:${day}:u${user.id}`)) || 0);
+  }
+  return json({
+    ok: true,
+    anonymous: false,
+    user: { id: user.id, username: user.username || "", phone: user.phone || "", fullName: user.full_name || "" },
+    dailyLimit: userDailyLimit,
+    dailyUsed: used,
+    dailyRemaining: Math.max(0, userDailyLimit - used),
+  });
 }
 
 function clientIp(request) {
@@ -1540,8 +1652,8 @@ async function handleFetchVideoProfile(request, env) {
     if (!shareUrl) {
       return json({ error: "missing url" }, 400);
     }
-    const { dailyLimit } = await resolveLimits(env);
-    const limit = await checkDailyParseLimit(request, env, "rate", dailyLimit);
+    const ident = await resolveIdentity(env, request);
+    const limit = await checkDailyParseLimit(request, env, "rate", ident.dailyLimit, ident.ident);
     if (!limit.allowed) {
       logParse(env, {
         ts: Math.floor(startedAt / 1000),
@@ -1558,7 +1670,7 @@ async function handleFetchVideoProfile(request, env) {
         durationMs: Date.now() - startedAt,
         cookieSource: "",
       });
-      return json({ error: limitMessage(limit.used, dailyLimit, false), dailyRemaining: 0 });
+      return json({ error: limitMessage(limit.used, ident.dailyLimit, false), dailyRemaining: 0, loginUrl: ident.isUser ? "" : LOGIN_PAGE_URL });
     }
     const cookieInfo = await resolveCookieInfo(body, env);
     cookieSource = cookieInfo.source;
@@ -1580,7 +1692,7 @@ async function handleFetchVideoProfile(request, env) {
       durationMs: Date.now() - startedAt,
       cookieSource,
     });
-    return json({ ...result, dailyRemaining: limit.remaining });
+    return json({ ...result, dailyRemaining: limit.remaining, authed: ident.isUser });
   } catch (err) {
     log("[handleFetchVideoProfile] error:", err.message);
     logParse(env, {

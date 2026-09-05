@@ -47,10 +47,21 @@ SPH_ADMIN_PASSWORD="管理密码" node scripts/sph-dev-server.mjs
 | `SPH_COOKIE` | 视频号接口所需的元宝 Web 端 Cookie |
 | `SPH_ADMIN_PASSWORD` | 管理员密码，设置后启用 `/admin` |
 | `SILICONFLOW_API_KEY` | SiliconFlow API Key，启用 ASR 转文字（也可在 `/admin` 在线配置） |
+| `AUTH_VERIFY_URL` | 4A 统一登录 verify 端点（默认 `https://auth.smartbid.site/api/auth/verify`；本地调试传 `off` 关闭登录体系） |
 | `SPH_KV` / `SPH_DB` | KV / SQLite 数据文件路径（默认 `data/`） |
 | `HOST` / `PORT` | 监听地址，默认 `0.0.0.0:8787` |
 
 > ASR 依赖 ffmpeg 抽取音频（VPS 部署脚本会自动装；本地需自行安装）。Cloudflare Worker 模式直接上传原视频，超过 25MB 无法转写。
+
+## 注册登录与额度（4A 统一登录）
+
+站点接入 smartbid.site 家族的 4A 统一登录（手机号验证码注册/登录），落地方式为**软门槛**：默认匿名可用，登录后获得更高的独立额度池。接入细节见 [APP_INTEGRATION_GUIDE.md](APP_INTEGRATION_GUIDE.md)。
+
+- **匿名**：按 IP 每天限 `dailyLimit` 次（默认 10，`/admin` 可调）；MCP 匿名调用 ASR 限时长
+- **注册用户**（4A 登录）：按 `user.id` 计数，每天限 `userDailyLimit` 次（默认匿名的 3 倍 = 30，`/admin` 可调），与匿名 IP 池互相独立
+- 前端顶栏展示登录态与今日剩余次数；额度将尽时提示"登录后可获得更多次数"
+- 服务端用 4A `/api/auth/verify` 验证 token（结果缓存 10 分钟），只用数字 `user.id` 做限流身份，不存密码
+- `/admin` → 限流设置可在线调整两个额度池
 
 ## VPS 部署
 
@@ -78,5 +89,6 @@ SPH_ADMIN_PASSWORD="管理密码" node scripts/sph-dev-server.mjs
 | `ADMIN_PASSWORD` | plain text | 管理员密码（可选，启用 `/admin`） |
 | `COOKIE_KV` | KV namespace | 全站 Cookie 在线更新（可选） |
 | `SILICONFLOW_API_KEY` | plain text | SiliconFlow API Key（可选，ASR 转文字；也可在 `/admin` 配置） |
+| `AUTH_VERIFY_URL` | plain text | 4A verify 端点（可选，默认 `https://auth.smartbid.site/api/auth/verify`，传空关闭登录体系） |
 
 > 本项目衍生于 [ltaoo/wx_channels_download](https://github.com/ltaoo/wx_channels_download) 的 sph 命令，解析逻辑对应其 `fetch_video_profile.go`。

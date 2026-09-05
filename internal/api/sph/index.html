@@ -119,6 +119,29 @@
       border-radius: 999px;
       padding: 4px 12px;
     }
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    /* 4A 登录态胶囊 */
+    .login-pill {
+      display: inline-flex;
+      align-items: center;
+      font-size: 12px;
+      color: var(--ink-2);
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 12px;
+      gap: 8px;
+    }
+    .login-pill a { color: var(--green-deep); font-weight: 600; text-decoration: none; }
+    .login-pill a:hover { text-decoration: underline; }
+    .login-pill #userName { color: var(--ink); font-weight: 600; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .login-pill .quota { color: var(--green-deep); }
+    .login-pill #logoutLink { color: var(--ink-3); font-weight: 400; margin-left: 2px; }
+    .login-pill #logoutLink:hover { color: var(--danger); text-decoration: none; }
     .status-pill .dot {
       width: 7px;
       height: 7px;
@@ -844,7 +867,18 @@
       <span class="brand-mark" aria-hidden="true"></span>
       <span id="brandName">视频号探针</span>
     </div>
-    <span class="status-pill"><span class="dot" aria-hidden="true"></span>服务在线</span>
+    <div class="topbar-right">
+      <span class="status-pill"><span class="dot" aria-hidden="true"></span>服务在线</span>
+      <!-- 4A 登录态：未登录显示「登录」链接，已登录显示手机号 + 退出 -->
+      <span class="login-pill" id="loginPill" hidden>
+        <a href="#" id="loginLink" hidden>登录</a>
+        <span id="userChip" hidden>
+          <b id="userName"></b>
+          <span class="quota" id="userQuota" title="今日剩余解析次数"></span>
+          <a href="#" id="logoutLink" title="退出登录">退出</a>
+        </span>
+      </span>
+    </div>
   </header>
 
   <div class="platform-tabs">
@@ -1056,6 +1090,7 @@
           <div class="sec-label">限流设置（匿名访问保护，保存即时生效）</div>
           <div class="cookie-status" id="limitsStatus"></div>
           <input type="number" id="limitDaily" min="1" max="1000" placeholder="每日解析次数上限 / IP（默认 10）">
+          <input type="number" id="limitUserDaily" min="1" max="10000" placeholder="注册用户（4A 登录）每日解析次数上限（默认 30，独立额度池）">
           <input type="number" id="limitAnonAsr" min="1" max="120" placeholder="匿名 ASR 时长上限，分钟（默认 5）">
           <input type="number" id="limitAsrCache" min="10" max="10000" placeholder="ASR 缓存条数上限（默认 100，LRU 淘汰）">
           <div class="modal-actions"><button class="btn primary" id="limitsSave">保存</button></div>
@@ -1085,6 +1120,96 @@
     const COOKIE_KEY = "sph_cookie_v1";
     const COOKIE_CHECK_KEY = "sph_cookie_check_v1";
     const ADMIN_TOKEN_KEY = "sph_admin_token_v1";
+
+    /* ============ 4A 统一登录（smartbid.site 全家桶账号） ============ */
+    const SSO_TOKEN_KEY = "access_token";   // 与其他 smartbid 系产品共用同一个 key
+    let ssoLoginEnabled = false;            // 服务端登录体系开关（/api/login_config）
+    let ssoUser = null;                     // 当前登录用户 { id, phone, ... }
+
+    function ssoGetToken() {
+      try { return localStorage.getItem(SSO_TOKEN_KEY) || ""; } catch (e) { return ""; }
+    }
+    function ssoSetToken(t) {
+      try { localStorage.setItem(SSO_TOKEN_KEY, t); } catch (e) { /* 隐私模式等 */ }
+    }
+    function ssoClearToken() {
+      try { localStorage.removeItem(SSO_TOKEN_KEY); } catch (e) { /* ignore */ }
+      ssoUser = null;
+      renderLoginPill();
+    }
+
+    // 页面加载时调用：URL sso_token 落地 → localStorage → 跨子域 cookie 兜底
+    function initSSO() {
+      const params = new URLSearchParams(window.location.search);
+      const urlToken = params.get("sso_token");
+      if (urlToken) {
+        ssoSetToken(urlToken);
+        params.delete("sso_token");
+        const newUrl = window.location.pathname +
+          (params.toString() ? "?" + params.toString() : "") + window.location.hash;
+        window.history.replaceState({}, "", newUrl);
+      } else if (!ssoGetToken()) {
+        // 跨子域 cookie 兜底：用户在别的 smartbid 系产品登录过，这里免登录识别
+        const m = document.cookie.match(/(?:^|; )sso_token=([^;]*)/);
+        if (m) ssoSetToken(decodeURIComponent(m[1]));
+      }
+    }
+
+    // 跳转 4A 统一登录页（登录/注册完自动带 sso_token 跳回当前页面）
+    function requireLogin() {
+      const currentUrl = window.location.href;
+      window.location.href = `https://auth.smartbid.site/login?redirect=${encodeURIComponent(currentUrl)}`;
+    }
+
+    function logout() {
+      ssoClearToken();
+      showToast("已退出登录");
+    }
+
+    // 渲染顶栏登录胶囊
+    function renderLoginPill() {
+      const pill = $("loginPill");
+      if (!ssoLoginEnabled) { pill.hidden = true; return; }
+      pill.hidden = false;
+      if (ssoUser) {
+        $("loginLink").hidden = true;
+        $("userChip").hidden = false;
+        const name = ssoUser.phone || ssoUser.username || ("用户" + ssoUser.id);
+        $("userName").textContent = String(name).replace(/^(\d{3})\d{4}(\d{4})$/, "$1****$2");
+        $("userQuota").textContent = typeof ssoUser.dailyRemaining === "number" ? ` 今日剩 ${ssoUser.dailyRemaining} 次` : "";
+      } else {
+        $("loginLink").hidden = false;
+        $("userChip").hidden = true;
+      }
+    }
+
+    // 用 4A token 向服务端换取身份 + 剩余额度；失败（401/网络）按未登录处理
+    async function refreshSsoUser() {
+      const token = ssoGetToken();
+      if (!ssoLoginEnabled || !token) { ssoUser = null; renderLoginPill(); return; }
+      try {
+        const resp = await fetch(`${API_BASE}/me`, { headers: { Authorization: "Bearer " + token } });
+        const data = await resp.json().catch(() => null);
+        if (data && data.ok && data.user) {
+          ssoUser = { ...data.user, dailyRemaining: data.dailyRemaining };
+        } else {
+          // token 无效/过期：清掉，下次需要身份的动作重新走 requireLogin
+          ssoClearToken();
+          ssoUser = null;
+        }
+      } catch (e) {
+        ssoUser = null; // 网络问题不误清 token
+      }
+      renderLoginPill();
+    }
+
+    // 带 4A token 的业务请求封装：解析/转写等需要身份额度的接口都用它
+    function authFetch(url, options) {
+      const token = ssoGetToken();
+      const headers = { ...((options && options.headers) || {}) };
+      if (token) headers.Authorization = "Bearer " + token;
+      return fetch(url, { ...(options || {}), headers });
+    }
 
     /* ============ 元素引用 ============ */
     const $ = (id) => document.getElementById(id);
@@ -1187,7 +1312,7 @@
       setCanvasStatus("解析中…");
 
       try {
-        const resp = await fetch(`${API_BASE}/fetch_video_profile`, {
+        const resp = await authFetch(`${API_BASE}/fetch_video_profile`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: target, cookie: getSavedCookie() }),
@@ -1201,11 +1326,13 @@
         renderResult(data, target);
         saveHistory(target);
         setCanvasStatus("");
-        // 接近每日上限时温和提示剩余次数（dailyRemaining=-1 表示不限流/管理员）
+        // 登录用户刷新顶栏剩余次数；接近上限时温和提示（dailyRemaining=-1 表示不限流/管理员）
+        if (data.authed) refreshSsoUser();
         if (typeof data.dailyRemaining === "number" && data.dailyRemaining >= 0 && data.dailyRemaining <= 3) {
+          const tipTail = !data.authed && ssoLoginEnabled ? "，登录后可获得更多次数" : "";
           showToast(data.dailyRemaining === 0
-            ? "今天的免费解析次数用完啦，明天再来吧～"
-            : `温馨提示：今天还剩 ${data.dailyRemaining} 次免费解析`);
+            ? "今天的免费解析次数用完啦，明天再来吧～" + tipTail
+            : `温馨提示：今天还剩 ${data.dailyRemaining} 次免费解析${tipTail}`);
         }
       } catch (err) {
         let msg = err.message;
@@ -1464,7 +1591,7 @@
       status.textContent = "转写中…（视频较长时可能需要几分钟）";
       $("asrBtn").disabled = true;
       try {
-        const resp = await fetch(`${API_BASE}/asr`, {
+        const resp = await authFetch(`${API_BASE}/asr`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url, shareUrl: current.queryUrl || "" }),
@@ -1752,12 +1879,13 @@
       $("panel").hidden = true;
       setCanvasStatus("解析中…");
       try {
-        const resp = await fetch(`${API_BASE}/youtube/info?url=${encodeURIComponent(target)}`);
+        const resp = await authFetch(`${API_BASE}/youtube/info?url=${encodeURIComponent(target)}`);
         const data = await resp.json();
         if (!resp.ok || !data.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
         renderYt(data, target);
         setCanvasStatus("");
         saveHistory(target);
+        if (data.authed) refreshSsoUser();
       } catch (err) {
         let msg = err.message;
         if (/cookie|bot|Sign in/i.test(msg)) msg += "（可能需要管理员更新 YouTube Cookie）";
@@ -2050,8 +2178,7 @@
         if (!$("authModal").hidden) hideAuthModal();
         else if (!$("settingsModal").hidden) closeSettings();
       }
-    });
-    $("cookieSave").addEventListener("click", async () => {
+    });    $("cookieSave").addEventListener("click", async () => {
       const res = normalizeCookieInput($("cookieInput").value);
       if (res.netscape) $("cookieInput").value = res.value; // 回显转换后的请求头格式
       saveCookie(res.value);
@@ -2346,20 +2473,22 @@
         if (handleAdmin401(resp, data)) return;
         if (data.ok) {
           $("limitDaily").value = data.dailyLimit;
+          $("limitUserDaily").value = data.userDailyLimit;
           $("limitAnonAsr").value = data.anonAsrMinutes;
           $("limitAsrCache").value = data.asrCacheMax;
-          $("limitsStatus").textContent = `当前：每 IP 每天 ${data.dailyLimit} 次解析；匿名 ASR 限 ${data.anonAsrMinutes} 分钟内视频；缓存 ${data.asrCacheMax} 条`;
+          $("limitsStatus").textContent = `当前：每 IP 每天 ${data.dailyLimit} 次；注册用户（4A 登录）每天 ${data.userDailyLimit} 次；匿名 ASR 限 ${data.anonAsrMinutes} 分钟内视频；缓存 ${data.asrCacheMax} 条`;
         }
       } catch (e) { /* 保持默认 */ }
     }
     $("limitsSave").addEventListener("click", async () => {
       const dailyLimit = Number($("limitDaily").value);
+      const userDailyLimit = Number($("limitUserDaily").value);
       const anonAsrMinutes = Number($("limitAnonAsr").value);
       const asrCacheMax = Number($("limitAsrCache").value);
       try {
         const resp = await adminFetch("/admin/limits", {
           method: "POST",
-          body: JSON.stringify({ dailyLimit, anonAsrMinutes, asrCacheMax }),
+          body: JSON.stringify({ dailyLimit, userDailyLimit, anonAsrMinutes, asrCacheMax }),
         });
         const data = await resp.json();
         if (handleAdmin401(resp, data)) return;
@@ -2414,6 +2543,20 @@
     renderCookieStatus();
     loadExamples();
     loadAd();
+
+    /* 4A 登录初始化：落地 token → 查登录开关 → 换身份与额度 → 渲染顶栏 */
+    initSSO();
+    fetch(`${API_BASE}/login_config`)
+      .then((r) => r.json())
+      .then((c) => {
+        ssoLoginEnabled = !!(c && c.ok && c.enabled);
+        renderLoginPill();
+        return refreshSsoUser();
+      })
+      .catch(() => renderLoginPill());
+    $("loginLink").addEventListener("click", (e) => { e.preventDefault(); requireLogin(); });
+    $("logoutLink").addEventListener("click", (e) => { e.preventDefault(); logout(); });
+
     if (isAdminPage) initAdminFlow();
   </script>
 </body>

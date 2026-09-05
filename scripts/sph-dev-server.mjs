@@ -36,6 +36,8 @@ const port = Number(process.env.PORT || 8787);
 const cookie = process.env.SPH_COOKIE || "";
 const adminPassword = process.env.SPH_ADMIN_PASSWORD || "";
 const siliconflowApiKey = process.env.SILICONFLOW_API_KEY || "";
+// 4A 统一登录 verify 端点（留空使用 worker 内置默认；传 "off" 关闭登录体系按纯匿名跑）
+const authVerifyUrl = process.env.AUTH_VERIFY_URL === "off" ? "" : process.env.AUTH_VERIFY_URL || "";
 
 // KV：文件持久化（模拟 Cloudflare KV，重启不丢）
 const kvPath = process.env.SPH_KV || join(root, "data", "kv.json");
@@ -642,6 +644,7 @@ const server = createServer(async (req, res) => {
         COOKIE: cookie,
         ADMIN_PASSWORD: adminPassword,
         SILICONFLOW_API_KEY: siliconflowApiKey,
+        AUTH_VERIFY_URL: authVerifyUrl,
         COOKIE_KV: kv,
         DB: dbEnv,
         YT: yt,
@@ -685,6 +688,7 @@ server.listen(port, host, () => {
   console.log(`cookie: ${cookie ? "已配置 (SPH_COOKIE)" : "未配置 —— 解析接口将报错，仅可测试页面/错误提示"}`);
   console.log(`admin: ${adminPassword ? "已配置 (SPH_ADMIN_PASSWORD)，入口 /admin" : "未配置 —— /admin 不可用"}`);
   console.log(`ASR: ${siliconflowApiKey ? "已配置 (SILICONFLOW_API_KEY)" : "未配置 —— 可在 /admin 在线设置 key"}，ffmpeg 抽取音频（${ffmpegBin}），并发上限 ${ASR_MAX_CONCURRENT}`);
+  console.log(`4A 登录: ${authVerifyUrl ? `已配置 verify @ ${authVerifyUrl}` : "未配置 AUTH_VERIFY_URL —— 使用 worker 内置默认端点（AUTH_VERIFY_URL=off 可关闭）"}`);
   console.log(`KV: 文件持久化 @ ${kvPath}（COOKIE_KV，含在线修改的密码）`);
   console.log(`DB: SQLite @ ${dbPath}（解析留痕 / 示例链接 / 广告位，SPH_DB 可改路径）`);
   console.log("修改 internal/api/sph/ 下文件后直接刷新浏览器即可。");
