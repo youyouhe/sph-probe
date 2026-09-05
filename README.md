@@ -58,7 +58,7 @@ SPH_ADMIN_PASSWORD="管理密码" node scripts/sph-dev-server.mjs
 站点接入 smartbid.site 家族的 4A 统一登录（手机号验证码注册/登录），落地方式为**软门槛**：默认匿名可用，登录后获得更高的独立额度池。接入细节见 [APP_INTEGRATION_GUIDE.md](APP_INTEGRATION_GUIDE.md)。
 
 - **匿名**：按 IP 每天限 `dailyLimit` 次（默认 10，`/admin` 可调）；MCP 匿名调用 ASR 限时长
-- **注册用户**（4A 登录）：按 `user.id` 计数，每天限 `userDailyLimit` 次（默认匿名的 3 倍 = 30，`/admin` 可调），与匿名 IP 池互相独立
+- **注册用户**（4A 登录）：按 `user.id` 计数，每天限 `userDailyLimit` 次（独立固定值，默认 30，`/admin` 可调），与匿名 IP 池互不联动
 - 前端顶栏展示登录态与今日剩余次数；额度将尽时提示"登录后可获得更多次数"
 - 服务端用 4A `/api/auth/verify` 验证 token（结果缓存 10 分钟），只用数字 `user.id` 做限流身份，不存密码
 - `/admin` → 限流设置可在线调整两个额度池

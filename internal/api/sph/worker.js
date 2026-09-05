@@ -1219,7 +1219,7 @@ async function handleAdminLimits(request, env) {
       asrCacheMax,
       defaults: {
         dailyLimit: DEFAULT_DAILY_PARSE_LIMIT,
-        userDailyLimit: DEFAULT_DAILY_PARSE_LIMIT * DEFAULT_USER_DAILY_MULTIPLIER,
+        userDailyLimit: DEFAULT_USER_DAILY_LIMIT,
         anonAsrMinutes: DEFAULT_ANON_ASR_MINUTES,
         asrCacheMax: DEFAULT_ASR_CACHE_MAX,
       },
@@ -1488,26 +1488,26 @@ const CHECK_COOKIE_URL = "https://weixin.qq.com/sph/Axv548mzBF";
 // ---- 频率限制：同一 IP 每天解析次数上限（admin 可在线调整，KV daily_limit） ----
 
 const DEFAULT_DAILY_PARSE_LIMIT = 10;
-// 注册用户（4A 登录）每日解析次数上限默认值：匿名额度的 3 倍（admin 可在线调整，KV user_daily_limit）
-const DEFAULT_USER_DAILY_MULTIPLIER = 3;
+// 注册用户（4A 登录）每日解析次数上限：独立固定值，默认 30（admin 可在线调整，KV user_daily_limit）
+// 不与匿名额度联动——两个额度池各自是明确的数量
+const DEFAULT_USER_DAILY_LIMIT = 30;
 
 // 当前生效的限流参数：KV 在线设置优先，回退默认值
 async function resolveLimits(env) {
   let dailyLimit = DEFAULT_DAILY_PARSE_LIMIT;
-  let userDailyLimit = 0; // 0 = 跟随匿名额度 × USER_DAILY_MULTIPLIER
+  let userDailyLimit = DEFAULT_USER_DAILY_LIMIT;
   let anonAsrMinutes = DEFAULT_ANON_ASR_MINUTES;
   let asrCacheMax = DEFAULT_ASR_CACHE_MAX;
   if (env.COOKIE_KV && env.COOKIE_KV.get) {
     const d = Number(await env.COOKIE_KV.get("daily_limit"));
     if (Number.isInteger(d) && d > 0) dailyLimit = d;
     const u = Number(await env.COOKIE_KV.get("user_daily_limit"));
-    if (Number.isInteger(u) && u >= 0) userDailyLimit = u;
+    if (Number.isInteger(u) && u > 0) userDailyLimit = u;
     const m = Number(await env.COOKIE_KV.get("anon_asr_minutes"));
     if (Number.isInteger(m) && m > 0) anonAsrMinutes = m;
     const c = Number(await env.COOKIE_KV.get("asr_cache_max"));
     if (Number.isInteger(c) && c > 0) asrCacheMax = c;
   }
-  if (!userDailyLimit) userDailyLimit = dailyLimit * DEFAULT_USER_DAILY_MULTIPLIER;
   return { dailyLimit, userDailyLimit, anonAsrMinutes, asrCacheMax };
 }
 
