@@ -36,8 +36,9 @@ const port = Number(process.env.PORT || 8787);
 const cookie = process.env.SPH_COOKIE || "";
 const adminPassword = process.env.SPH_ADMIN_PASSWORD || "";
 const siliconflowApiKey = process.env.SILICONFLOW_API_KEY || "";
-// 4A 统一登录 verify 端点（留空使用 worker 内置默认；传 "off" 关闭登录体系按纯匿名跑）
-const authVerifyUrl = process.env.AUTH_VERIFY_URL === "off" ? "" : process.env.AUTH_VERIFY_URL || "";
+// 4A 统一登录 verify 端点（未设置用 worker 内置默认；传 "off" 关闭登录体系按纯匿名跑）
+// 注意：未设置时不注入该键（undefined），让 worker 走内置默认端点
+const authVerifyUrl = process.env.AUTH_VERIFY_URL === "off" ? "" : process.env.AUTH_VERIFY_URL || undefined;
 
 // KV：文件持久化（模拟 Cloudflare KV，重启不丢）
 const kvPath = process.env.SPH_KV || join(root, "data", "kv.json");
@@ -644,7 +645,7 @@ const server = createServer(async (req, res) => {
         COOKIE: cookie,
         ADMIN_PASSWORD: adminPassword,
         SILICONFLOW_API_KEY: siliconflowApiKey,
-        AUTH_VERIFY_URL: authVerifyUrl,
+        ...(authVerifyUrl === undefined ? {} : { AUTH_VERIFY_URL: authVerifyUrl }),
         COOKIE_KV: kv,
         DB: dbEnv,
         YT: yt,
