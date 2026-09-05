@@ -1571,12 +1571,14 @@ async function resolveAuthUser(request, env) {
   const token = bearerToken(request);
   if (!token || !authVerifyUrl(env)) return null;
   logAuthStateOnce(env);
-  // 命中缓存直接返回（注意区分"确认无效"与"未缓存"）
+  // 命中缓存直接返回；过期条目删掉重新 verify（不能 return null——那会把 token 永久判死）
   const cached = authCache.get(token);
   if (cached) {
-    if (cached.exp <= Date.now() / 1000) return null;
-    if (!cached.user) log("[auth] token 命中无效缓存（verify 曾失败，短缓存期内按匿名）");
-    return cached.user;
+    if (cached.exp > Date.now() / 1000) {
+      if (!cached.user) log("[auth] token 命中无效缓存（verify 曾失败，短缓存期内按匿名）");
+      return cached.user;
+    }
+    authCache.delete(token);
   }
   try {
     const resp = await fetch(authVerifyUrl(env), {
