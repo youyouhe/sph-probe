@@ -1558,19 +1558,33 @@ function authVerifyUrl(env) {
   return AUTH_VERIFY_URL_DEFAULT;
 }
 
+// 首次请求时打印登录体系状态，便于排查"回跳后仍是匿名"类问题
+let authStateLogged = false;
+function logAuthStateOnce(env) {
+  if (authStateLogged) return;
+  authStateLogged = true;
+  log("[auth] 登录体系:", authVerifyUrl(env) ? `启用，verify=${authVerifyUrl(env)}` : "关闭（AUTH_VERIFY_URL 为空字符串）");
+}
+
 // 用 4A token 换取用户信息；无效/过期/未启用返回 null（不抛错——登录态缺失只是降级为匿名）
 async function resolveAuthUser(request, env) {
   const token = bearerToken(request);
   if (!token || !authVerifyUrl(env)) return null;
+  logAuthStateOnce(env);
   // 命中缓存直接返回（注意区分"确认无效"与"未缓存"）
   const cached = authCache.get(token);
-  if (cached) return cached.exp > Date.now() / 1000 ? cached.user : null;
+  if (cached) {
+    if (cached.exp <= Date.now() / 1000) return null;
+    if (!cached.user) log("[auth] token 命中无效缓存（verify 曾失败，短缓存期内按匿名）");
+    return cached.user;
+  }
   try {
     const resp = await fetch(authVerifyUrl(env), {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(8000),
     });
     if (!resp.ok) {
+      log("[auth] verify 返回", resp.status, "（token 无效/过期），60 秒内该 token 按匿名处理");
       authCache.set(token, { user: null, exp: Date.now() / 1000 + 60 }); // 无效 token 短缓存，防刷
       return null;
     }
