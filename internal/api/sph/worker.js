@@ -410,6 +410,17 @@ function isYtUrl(raw) {
   }
 }
 
+// 上游对无有效视频的内容（图片贴/直播回放等）会返回占位直链 finder.video.qq.com/N.mp4，
+// 真实直链都是 stodownload?encfilekey=... 形式。占位链点了必 404，提前识别
+function isPlaceholderVideoUrl(raw) {
+  try {
+    const u = new URL(raw);
+    return u.hostname.toLowerCase() === "finder.video.qq.com" && /^\/\d+\.mp4$/.test(u.pathname);
+  } catch (e) {
+    return false;
+  }
+}
+
 function ytNotAvailable(env) {
   return !env.YT || typeof env.YT.getInfo !== "function";
 }
@@ -685,6 +696,41 @@ async function asrCachePut(env, key, text) {
   await env.COOKIE_KV.put(ASR_CACHE_INDEX_KEY, JSON.stringify(idx));
 }
 
+// 下载视频直链（转写用）：腾讯 CDN 偶发停滞——连接建立但不回响应头，默认要等 300s 才报错，
+// 期间一直占着转写并发槽。这里 45 秒拿不到响应头即判死，网络类失败重试 1 次（新连接通常立即恢复）。
+// 首包超时只管响应头阶段，正文交给整体 10 分钟兜底（AbortSignal.any 组合）
+async function downloadVideoForAsr(url) {
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const headerTimer = new AbortController();
+      const t = setTimeout(() => headerTimer.abort(), 45000);
+      let resp;
+      try {
+        resp = await fetch(url, { signal: AbortSignal.any([headerTimer.signal, AbortSignal.timeout(600000)]) });
+      } finally {
+        clearTimeout(t);
+      }
+      if (!resp.ok) {
+        // 4xx 多为直链签名过期（解析和转写之间隔太久）；404 也可能是占位链漏网
+        if (resp.status === 400 || resp.status === 403 || resp.status === 404) {
+          throw new Error("视频直链已失效，请重新解析后再转写（http " + resp.status + "）");
+        }
+        throw new Error(`下载视频失败: http ${resp.status}`);
+      }
+      return resp;
+    } catch (err) {
+      lastErr = err;
+      // 仅网络类错误重试；带业务语义的（上面的直链失效等）直接抛
+      if (err.message && !/fetch failed|aborted|timeout/i.test(err.message) && !(err.cause && /timeout|reset|other side closed/i.test(String(err.cause.code || err.cause.message || "")))) {
+        throw err;
+      }
+      if (attempt === 0) log("[asr] 下载停滞/失败，重试一次:", err.message);
+    }
+  }
+  throw lastErr;
+}
+
 // 执行一次转写任务：取音频 → SiliconFlow → 写缓存与留痕。成功返回文本，失败抛错
 // VPS 部署有并发槽位（env.ASR.acquire/release）：全程持有，超出并发的任务在此排队等待
 async function runAsrJob(env, request, startedAt, { videoUrl, exportId, cacheKey, model, apiKey }) {
@@ -698,8 +744,7 @@ async function runAsrJob(env, request, startedAt, { videoUrl, exportId, cacheKey
       bytes = audio.bytes;
       filename = audio.filename;
     } else {
-      const resp = await fetch(videoUrl);
-      if (!resp.ok) throw new Error(`下载视频失败: http ${resp.status}`);
+      const resp = await downloadVideoForAsr(videoUrl);
       const size = Number(resp.headers.get("content-length") || 0);
       if (size > ASR_MAX_BYTES) throw new Error("视频超过 25MB，当前部署无法转写（VPS 部署可通过 ffmpeg 压缩音频，不受此限）");
       bytes = await resp.arrayBuffer();
@@ -807,6 +852,9 @@ async function handleAsr(request, env, ctx) {
     const shareUrl = body && typeof body.shareUrl === "string" ? body.shareUrl.trim() : "";
     if (!/^https?:\/\//i.test(videoUrl)) {
       return json({ ok: false, reason: "bad_request", error: "url 参数不合法" }, 400);
+    }
+    if (isPlaceholderVideoUrl(videoUrl)) {
+      return json({ ok: false, reason: "bad_request", error: "该视频没有可用的音视频直链（可能是图片或其他类型内容），无法转写语音" });
     }
     const r = await asrStart(env, request, ctx, { videoUrl, exportId, shareUrl });
     if (r.pending) {
@@ -937,7 +985,13 @@ async function mcpCallTool(name, args, env, request, ctx, extra = {}) {
     const { result, exportId } = await fetchVideoProfile(shareUrl, cookieInfo.value);
     const fi = (result.data && result.data.feedInfo) || {};
     const ai = (result.data && result.data.authorInfo) || {};
-    const videoUrl = (fi.h264VideoInfo && fi.h264VideoInfo.videoUrl) || (fi.h265VideoInfo && fi.h265VideoInfo.videoUrl) || fi.videoUrl || "";
+    // 候选直链过滤占位链（finder.video.qq.com/N.mp4，点了必 404）
+    const candidates = [
+      fi.h264VideoInfo && fi.h264VideoInfo.videoUrl,
+      fi.h265VideoInfo && fi.h265VideoInfo.videoUrl,
+      fi.videoUrl,
+    ].filter((u) => u && !isPlaceholderVideoUrl(u));
+    const videoUrl = candidates[0] || "";
     logParse(env, {
       ts: Math.floor(startedAt / 1000),
       ip: clientIp(request),
@@ -994,6 +1048,7 @@ async function mcpCallTool(name, args, env, request, ctx, extra = {}) {
     const videoUrl = String(args.url || "").trim();
     const shareUrl = String(args.shareUrl || "").trim();
     if (!/^https?:\/\//i.test(videoUrl)) throw new Error("url 参数不合法（需视频直链）");
+    if (isPlaceholderVideoUrl(videoUrl)) throw new Error("该视频没有可用的音视频直链（可能是图片或其他类型内容），无法转写语音");
     if (extra.anonymous) {
       // 保护：匿名调用只放行 5 分钟内的视频（4A 登录用户不受此时长限制）。先查缓存——已转写过的直接返回，不卡时长
       const { model } = await resolveAsrConfig(env);

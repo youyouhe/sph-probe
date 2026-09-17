@@ -404,6 +404,39 @@ function runFfmpeg(args) {
   });
 }
 
+// 下载视频直链（转写用）：腾讯 CDN 偶发停滞——连接建立但不回响应头，默认要等 300s（undici
+// headersTimeout）才报错，期间一直占着转写并发槽。这里 45 秒拿不到响应头即判死并重试一次
+// （新连接通常立即恢复）。首包超时只管响应头阶段，正文交给整体 10 分钟兜底
+async function fetchVideoForAsr(url) {
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const headerTimer = new AbortController();
+      const t = setTimeout(() => headerTimer.abort(), 45000);
+      let resp;
+      try {
+        resp = await fetch(url, { signal: AbortSignal.any([headerTimer.signal, AbortSignal.timeout(600000)]) });
+      } finally {
+        clearTimeout(t);
+      }
+      if (!resp.ok) {
+        // 4xx 多为直链签名过期（解析和转写之间隔太久）
+        if (resp.status === 400 || resp.status === 403 || resp.status === 404) {
+          throw new Error("视频直链已失效，请重新解析后再转写（http " + resp.status + "）");
+        }
+        throw new Error(`下载视频失败: http ${resp.status}`);
+      }
+      return resp;
+    } catch (err) {
+      lastErr = err;
+      // 仅网络类错误（停滞/中断/超时）重试；带业务语义的（直链失效等）直接抛
+      if (err.message && !/fetch failed|aborted|timed? ?out/i.test(err.message)) throw err;
+      if (attempt === 0) console.log(`[asr] 下载停滞/失败，重试一次: ${err.message}`);
+    }
+  }
+  throw lastErr;
+}
+
 const asr = {
   // 下载视频 → ffmpeg 抽取 16kHz 单声道 mp3（大幅缩小上传体积），返回 { bytes, filename }
   async prepareAudio(url) {
@@ -411,8 +444,7 @@ const asr = {
     const videoPath = join(asrTmpDir, `sph-asr-${id}.bin`);
     const audioPath = join(asrTmpDir, `sph-asr-${id}.mp3`);
     try {
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`下载视频失败: http ${resp.status}`);
+      const resp = await fetchVideoForAsr(url);
       await pipeline(Readable.fromWeb(resp.body), createWriteStream(videoPath));
       await runFfmpeg(["-y", "-i", videoPath, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", audioPath]);
       return { bytes: readFileSync(audioPath), filename: "audio.mp3" };

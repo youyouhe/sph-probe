@@ -1367,11 +1367,16 @@
       current = { fi, ai, raw: data, queryUrl };
       resetAsr();
 
-      /* 候选视频源：H.264 / H.265 / 兜底 */
+      /* 候选视频源：H.264 / H.265 / 兜底。占位直链（finder.video.qq.com/N.mp4）是上游对
+         无有效视频内容返回的假地址，点开必 404，不渲染成可选清晰度 */
+      const isPlaceholder = (u) => {
+        try { const x = new URL(u); return x.hostname === "finder.video.qq.com" && /^\/\d+\.mp4$/.test(x.pathname); }
+        catch (e) { return false; }
+      };
       const variants = [];
-      if (fi.h264VideoInfo && fi.h264VideoInfo.videoUrl) variants.push({ label: "H.264", url: fi.h264VideoInfo.videoUrl });
-      if (fi.h265VideoInfo && fi.h265VideoInfo.videoUrl) variants.push({ label: "H.265", url: fi.h265VideoInfo.videoUrl });
-      if (fi.videoUrl && !variants.some((v) => v.url === fi.videoUrl)) variants.push({ label: "默认", url: fi.videoUrl });
+      if (fi.h264VideoInfo && fi.h264VideoInfo.videoUrl && !isPlaceholder(fi.h264VideoInfo.videoUrl)) variants.push({ label: "H.264", url: fi.h264VideoInfo.videoUrl });
+      if (fi.h265VideoInfo && fi.h265VideoInfo.videoUrl && !isPlaceholder(fi.h265VideoInfo.videoUrl)) variants.push({ label: "H.265", url: fi.h265VideoInfo.videoUrl });
+      if (fi.videoUrl && !isPlaceholder(fi.videoUrl) && !variants.some((v) => v.url === fi.videoUrl)) variants.push({ label: "默认", url: fi.videoUrl });
       current.variants = variants;
       current.activeIdx = 0;
 
