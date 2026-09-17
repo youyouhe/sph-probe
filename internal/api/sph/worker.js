@@ -771,6 +771,7 @@ async function runAsrJob(env, request, startedAt, { videoUrl, exportId, cacheKey
       cookieSource: "asr",
       platform: "sph",
     });
+    log(`[runAsrJob] success: ${filename} 耗时${Math.round((Date.now() - startedAt) / 1000)}s 转写${text.length}字 cacheKey=${cacheKey} model=${model}`);
     return text;
   } catch (err) {
     log("[runAsrJob] error:", err.message);
