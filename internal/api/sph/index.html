@@ -1122,7 +1122,16 @@
     const ADMIN_TOKEN_KEY = "sph_admin_token_v1";
 
     /* ============ 4A 统一登录（smartbid.site 全家桶账号） ============ */
+    /* OAuth2 授权码 + PKCE（拷贝自 auth-service pkce-login.js v1.0）；
+       legacy ?sso_token=/cookie 兼容链在共存期保留（APP_INTEGRATION_GUIDE.md §0/§1） */
     const SSO_TOKEN_KEY = "access_token";   // 与其他 smartbid 系产品共用同一个 key
+    const SSO_COOKIE = "sso_token";
+    const LOGOUT_FLAG_KEY = "sso_logged_out";  // 登出抑制标志（防 Auto-SSO 弹回）
+    const OAUTH2_ATTEMPT_KEY = "oauth2_attempt";
+    const OAUTH2_ATTEMPT_MAX_AGE_MS = 60000;   // 授权码 TTL 120s 的一半，陈旧即丢弃
+    const OAUTH2_CLIENT_ID = "sph";
+    const OAUTH2_REDIRECT_URI = location.origin + "/";  // 须与 4A 注册表白名单精确一致
+    const OAUTH2_AUTH_BASE = "https://auth.smartbid.site";
     let ssoLoginEnabled = false;            // 服务端登录体系开关（/api/login_config）
     let ssoUser = null;                     // 当前登录用户 { id, phone, ... }
 
@@ -1138,31 +1147,141 @@
       renderLoginPill();
     }
 
-    // 页面加载时调用：URL sso_token 落地 → localStorage → 跨子域 cookie 兜底
+    // base64url（无填充）。ArrayBuffer/Uint8Array 统一走这里
+    function b64url(bytes) {
+      let bin = "";
+      for (const b of new Uint8Array(bytes)) bin += String.fromCharCode(b);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+    // PKCE 对：verifier 随机原文；challenge = base64url(SHA-256(verifier))
+    async function pkcePair() {
+      const raw = new Uint8Array(48);
+      crypto.getRandomValues(raw);
+      const verifier = b64url(raw);
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+      return { verifier, code_challenge: b64url(digest) };
+    }
+
+    // 跳 4A 授权端点。60s 内已有未完成 attempt 则放弃：cookie 兜底有效 + 交换持续失败时
+    // "requireLogin → 发码 → 回跳 → 交换失败" 会无限回弹，这道闸自愈
+    async function initLogin() {
+      const prev = sessionStorage.getItem(OAUTH2_ATTEMPT_KEY);
+      if (prev) {
+        try {
+          if (Date.now() - JSON.parse(prev).ts < OAUTH2_ATTEMPT_MAX_AGE_MS) return false;
+        } catch (e) { /* 损坏即覆盖 */ }
+      }
+      const { verifier, code_challenge } = await pkcePair();
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      const state = b64url(bytes);
+      sessionStorage.setItem(OAUTH2_ATTEMPT_KEY, JSON.stringify({ verifier, state, ts: Date.now() }));
+      const q = new URLSearchParams({
+        response_type: "code",
+        client_id: OAUTH2_CLIENT_ID,
+        redirect_uri: OAUTH2_REDIRECT_URI,
+        code_challenge,
+        code_challenge_method: "S256",
+        state,
+      });
+      window.location.href = OAUTH2_AUTH_BASE + "/oauth2/authorize?" + q;
+      return true;
+    }
+
+    // 页面加载时最先调用（先于 initSSO）。返回 'callback-ok'|'callback-fail'|'not-callback'
+    async function handleOauth2Callback() {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("code");
+      if (!code) return "not-callback";
+
+      // state 必须在清 URL 之前取出；code/state 不留地址栏（失败重放也无害，码是一次性的）
+      const state = params.get("state");
+      params.delete("code");
+      params.delete("state");
+      window.history.replaceState({}, "", window.location.pathname +
+        (params.toString() ? "?" + params.toString() : "") + window.location.hash);
+
+      let attempt = null;
+      try { attempt = JSON.parse(sessionStorage.getItem(OAUTH2_ATTEMPT_KEY) || "null"); } catch (e) { /* 视为缺失 */ }
+      const valid = attempt && attempt.state === state &&
+        (Date.now() - attempt.ts) < OAUTH2_ATTEMPT_MAX_AGE_MS;
+      // attempt 只在成功时清除：失败路径保留，作为 initLogin 60s 防回弹闸的依据
+      if (!valid) return "callback-fail";
+
+      try {
+        const resp = await fetch(API_BASE + "/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, code_verifier: attempt.verifier, redirect_uri: OAUTH2_REDIRECT_URI }),
+        });
+        const data = await resp.json().catch(() => null);
+        if (!resp.ok || !data || !data.access_token) throw new Error("HTTP " + resp.status);
+        ssoSetToken(data.access_token);
+        sessionStorage.removeItem(OAUTH2_ATTEMPT_KEY);
+        try { sessionStorage.removeItem(LOGOUT_FLAG_KEY); } catch (e) { /* ignore */ }
+        return "callback-ok";
+      } catch (e) {
+        console.warn("[sso] 授权码交换失败：", e);
+        return "callback-fail";  // 旧 token 还在就沿用；没有则由调用方 requireLogin
+      }
+    }
+
+    // 页面加载时调用：legacy 兼容链——URL sso_token 落地 → localStorage → 抑制标志 → 跨子域 cookie 兜底。
+    // 全部家族应用迁完后本函数整体删除
     function initSSO() {
       const params = new URLSearchParams(window.location.search);
       const urlToken = params.get("sso_token");
       if (urlToken) {
         ssoSetToken(urlToken);
+        try { sessionStorage.removeItem(LOGOUT_FLAG_KEY); } catch (e) { /* ignore */ }
         params.delete("sso_token");
         const newUrl = window.location.pathname +
           (params.toString() ? "?" + params.toString() : "") + window.location.hash;
         window.history.replaceState({}, "", newUrl);
-      } else if (!ssoGetToken()) {
-        // 跨子域 cookie 兜底：用户在别的 smartbid 系产品登录过，这里免登录识别
-        const m = document.cookie.match(/(?:^|; )sso_token=([^;]*)/);
-        if (m) ssoSetToken(decodeURIComponent(m[1]));
+        return;
+      }
+      if (ssoGetToken()) return;
+      // 登出抑制：本标签页显式退出过，不再从共享 cookie 静默恢复登录态
+      try { if (sessionStorage.getItem(LOGOUT_FLAG_KEY)) return; } catch (e) { /* ignore */ }
+      // 跨子域 cookie 兜底：用户在别的 smartbid 系产品登录过，这里免登录识别
+      const m = document.cookie.match(/(?:^|; )sso_token=([^;]*)/);
+      if (m) ssoSetToken(decodeURIComponent(m[1]));
+    }
+
+    // 删除 4A 写在共享父域上的 sso_token cookie（属性须精确匹配，见 APP_LOGOUT_GUIDE.md §3）
+    function deleteSsoCookie() {
+      const labels = window.location.hostname.split(".");
+      const parentDomain = labels.length >= 2 ? labels.slice(-2).join(".") : null;
+      const domains = parentDomain ? [parentDomain, "." + parentDomain] : [undefined];
+      for (const domain of domains) {
+        document.cookie = SSO_COOKIE + "=; Max-Age=0; path=/" + (domain ? "; domain=" + domain : "");
       }
     }
 
-    // 跳转 4A 统一登录页（登录/注册完自动带 sso_token 跳回当前页面）
-    function requireLogin() {
-      const currentUrl = window.location.href;
-      window.location.href = `https://auth.smartbid.site/login?redirect=${encodeURIComponent(currentUrl)}`;
+    // 需要身份时才调用：跳 4A 授权端点（已登录用户由 4A 静默 302 带授权码回来，无感换发）
+    async function requireLogin() {
+      // 抑制标志置位时先删共享 cookie，否则 4A 登录页见 cookie 即弹回、不展示表单
+      try { if (sessionStorage.getItem(LOGOUT_FLAG_KEY)) deleteSsoCookie(); } catch (e) { /* ignore */ }
+      await initLogin();
     }
 
-    function logout() {
+    // 本站登出：清 token + 删共享 cookie + 置抑制标志 + 经服务端代理通知 4A 审计（尽力而为）
+    async function logout() {
+      const token = ssoGetToken();
+      const cookieToken = (document.cookie.match(/(?:^|; )sso_token=([^;]*)/) || [])[1];
       ssoClearToken();
+      deleteSsoCookie();
+      try { sessionStorage.setItem(LOGOUT_FLAG_KEY, "1"); } catch (e) { /* ignore */ }
+      const bearer = token || (cookieToken ? decodeURIComponent(cookieToken) : "");
+      if (bearer) {
+        try {
+          await fetch(API_BASE + "/auth/logout", {
+            method: "POST",
+            headers: { Authorization: "Bearer " + bearer },
+            signal: AbortSignal.timeout(3000),
+          });
+        } catch (e) { /* 审计尽力而为；401 也算成功 */ }
+      }
       showToast("已退出登录");
     }
 
@@ -2549,16 +2668,22 @@
     loadExamples();
     loadAd();
 
-    /* 4A 登录初始化：落地 token → 查登录开关 → 换身份与额度 → 渲染顶栏 */
-    initSSO();
-    fetch(`${API_BASE}/login_config`)
-      .then((r) => r.json())
-      .then((c) => {
-        ssoLoginEnabled = !!(c && c.ok && c.enabled);
-        renderLoginPill();
-        return refreshSsoUser();
-      })
-      .catch(() => renderLoginPill());
+    /* 4A 登录初始化：OAuth2 回调处理（?code=）优先 → legacy 恢复链 → 查登录开关 →
+       换身份与额度 → 渲染顶栏。交换走 /api/token 代理（code+verifier 由本站
+       form 转发 4A /oauth2/token，SPA 不直连 4A——不在其 CORS 白名单） */
+    void (async () => {
+      const result = await handleOauth2Callback();
+      if (result === "not-callback") initSSO();
+      if (result === "callback-fail" && !ssoGetToken()) await requireLogin();
+      fetch(`${API_BASE}/login_config`)
+        .then((r) => r.json())
+        .then((c) => {
+          ssoLoginEnabled = !!(c && c.ok && c.enabled);
+          renderLoginPill();
+          return refreshSsoUser();
+        })
+        .catch(() => renderLoginPill());
+    })();
     $("loginLink").addEventListener("click", (e) => { e.preventDefault(); requireLogin(); });
     $("logoutLink").addEventListener("click", (e) => { e.preventDefault(); logout(); });
 

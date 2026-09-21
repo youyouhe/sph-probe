@@ -163,6 +163,20 @@ export default {
       return json({ ok: true, enabled: !!authVerifyUrl(env), loginUrl: LOGIN_PAGE_URL });
     }
 
+    // POST /api/token —— OAuth2 授权码交换代理：前端把 {code, code_verifier, redirect_uri}
+    // POST 过来，这里 form 转发 4A /oauth2/token。SPA 不直连 4A——不在其 CORS 白名单，
+    // 且 code_verifier 不必离开本站。redirect_uri 由前端传（须与 authorize 一步精确一致，
+    // dev 为 http://localhost:8080/、生产为 https://sph.smartbid.site/）。无状态透传。
+    if (url.pathname === "/api/token" && request.method === "POST") {
+      return handleTokenExchange(request, env);
+    }
+
+    // POST /api/auth/logout —— 登出审计代理：浏览器直连 4A 会被 CORS preflight 拦截，
+    // 由本服务端转发；顺带清掉本地 verify 缓存，避免已注销 token 在 TTL 内仍被视为有效
+    if (url.pathname === "/api/auth/logout" && request.method === "POST") {
+      return handleLogoutProxy(request, env);
+    }
+
     // GET/POST /api/admin/asr_config —— ASR key/模型管理（需 Bearer token）
     if (url.pathname === "/api/admin/asr_config" && (request.method === "GET" || request.method === "POST")) {
       return handleAdminAsrConfig(request, env);
@@ -1603,6 +1617,9 @@ function limitMessage(used, limit, forMcp) {
 const LOGIN_PAGE_URL = "https://auth.smartbid.site/login";
 // 4A verify 端点默认值（可用部署环境变量 AUTH_VERIFY_URL 覆盖，置空字符串可整体关闭登录体系）
 const AUTH_VERIFY_URL_DEFAULT = "https://auth.smartbid.site/api/auth/verify";
+// OAuth2 授权码交换 + 登出审计端点（4A OAUTH2_CODE_FLOW=1 后启用）
+const AUTH_TOKEN_URL_DEFAULT = "https://auth.smartbid.site/oauth2/token";
+const AUTH_LOGOUT_URL_DEFAULT = "https://auth.smartbid.site/api/auth/logout";
 
 // 跨请求缓存 verify 结果，减少对 4A 的调用（token 24h 有效，缓存 10 分钟足够）
 const AUTH_CACHE_TTL = 600;
@@ -1612,6 +1629,16 @@ function authVerifyUrl(env) {
   // 未配置时用默认端点；显式传空字符串视为关闭登录体系
   if (typeof env.AUTH_VERIFY_URL === "string") return env.AUTH_VERIFY_URL;
   return AUTH_VERIFY_URL_DEFAULT;
+}
+
+function oauthTokenUrl(env) {
+  if (typeof env.AUTH_TOKEN_URL === "string" && env.AUTH_TOKEN_URL) return env.AUTH_TOKEN_URL;
+  return AUTH_TOKEN_URL_DEFAULT;
+}
+
+function authLogoutUrl(env) {
+  if (typeof env.AUTH_LOGOUT_URL === "string" && env.AUTH_LOGOUT_URL) return env.AUTH_LOGOUT_URL;
+  return AUTH_LOGOUT_URL_DEFAULT;
 }
 
 // 首次请求时打印登录体系状态，便于排查"回跳后仍是匿名"类问题
@@ -1669,6 +1696,65 @@ async function resolveIdentity(env, request) {
     return { ident: String(user.id), isUser: true, dailyLimit: userDailyLimit };
   }
   return { ident: "", isUser: false, dailyLimit };
+}
+
+// POST /api/token —— OAuth2 授权码交换（form 转发 4A /oauth2/token，透传 200/4xx）
+async function handleTokenExchange(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return json({ error: "invalid_request" }, 400);
+  }
+  const code = body && typeof body.code === "string" ? body.code : null;
+  const verifier = body && typeof body.code_verifier === "string" ? body.code_verifier : null;
+  const redirectUri = body && typeof body.redirect_uri === "string" ? body.redirect_uri : null;
+  // redirect_uri 须与 authorize 一步精确一致；白名单 = 生产 + dev 各一条，防钓鱼回调
+  const redirectOk = /^https:\/\/sph\.smartbid\.site\/$|^http:\/\/localhost:8080\//.test(redirectUri || "");
+  if (!code || !verifier || !redirectOk) {
+    return json({ error: "invalid_request" }, 400);
+  }
+  const form = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    code_verifier: verifier,
+    client_id: (typeof env.OAUTH2_CLIENT_ID === "string" && env.OAUTH2_CLIENT_ID) || "sph",
+    redirect_uri: redirectUri,
+  });
+  try {
+    const resp = await fetch(oauthTokenUrl(env), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form,
+      signal: AbortSignal.timeout(8000),
+    });
+    const payload = await resp.json().catch(() => ({}));
+    log(`[auth] token exchange: status=${resp.status}`);
+    return json(payload, resp.status);
+  } catch (err) {
+    log(`[auth] token exchange failed: ${err.message}`);
+    return json({ error: "auth_unavailable" }, 502);
+  }
+}
+
+// POST /api/auth/logout —— 登出审计代理（转发 Bearer 给 4A；401 也算成功）+ 清本地 verify 缓存
+async function handleLogoutProxy(request, env) {
+  const token = bearerToken(request);
+  if (!token) return json({ error: "no_token" }, 401);
+  let fourAStatus = "unreachable";
+  try {
+    const resp = await fetch(authLogoutUrl(env), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    fourAStatus = resp.status;
+    log(`[auth] 4a logout forwarded: status=${resp.status}`);
+  } catch (err) {
+    log(`[auth] 4a logout forward failed: ${err.message}`);
+  }
+  authCache.delete(token);
+  return json({ ok: true, four_a_status: fourAStatus });
 }
 
 // GET /api/me —— 前端展示登录态与剩余额度；未登录返回 ok:false + 登录入口说明
