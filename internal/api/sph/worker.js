@@ -32,11 +32,40 @@ export default {
       });
     }
 
-    // GET / → serve index.html
+    // GET / → markdown 协商或 index.html（附 ai-catalog 发现 Link 头）
     if (url.pathname === "/" && request.method === "GET") {
+      const link = '</.well-known/ai-catalog.json>; rel="ai-catalog"';
+      if ((request.headers.get("accept") || "").includes("text/markdown")) {
+        return new Response(SITE_MARKDOWN, {
+          headers: { "Content-Type": "text/markdown; charset=utf-8", "Cache-Control": "no-cache", Link: link },
+        });
+      }
       return new Response(indexHtml, {
-        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache, no-store, must-revalidate" },
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache, no-store, must-revalidate", Link: link },
       });
+    }
+
+    // GET /robots.txt —— 爬虫与 AI 爬虫声明（agent-ready）
+    if (url.pathname === "/robots.txt" && request.method === "GET") {
+      return new Response(ROBOTS_TXT, {
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    // GET /.well-known/mcp/server-card.json、/.well-known/mcp/server-cards.json、/.well-known/mcp.json
+    // —— MCP Server Card（三路径同一份 JSON，兼容不同探测器的候选路径）
+    if (
+      (url.pathname === "/.well-known/mcp/server-card.json" ||
+        url.pathname === "/.well-known/mcp/server-cards.json" ||
+        url.pathname === "/.well-known/mcp.json") &&
+      request.method === "GET"
+    ) {
+      return json(MCP_SERVER_CARD);
+    }
+
+    // GET /.well-known/ai-catalog.json —— HTTP API 盘点（agent-ready ARD）
+    if (url.pathname === "/.well-known/ai-catalog.json" && request.method === "GET") {
+      return json(AI_CATALOG);
     }
 
     // POST /api/fetch_video_profile
@@ -986,6 +1015,110 @@ function mcpTools() {
       !(asrOff && (t.name === "transcribe_video" || t.name === "get_transcription"))
   );
 }
+
+// ---- Agent-Ready 声明（robots.txt / well-known / markdown 协商） ----
+// 按 agent-ready playbook 如实宣告现有能力，供 AI 代理发现；不改动业务解析逻辑。
+// 注意：本站无独立 sitemap 文件，robots.txt 的 Sitemap 行指向站点根（规格要求含该行）。
+
+const SITE_ORIGIN = "https://sph.smartbid.site";
+
+// AI 爬虫逐个给出 UA 段声明（isitagentready 检查每段需有 Allow/Disallow）
+const AI_BOT_UAS = [
+  "GPTBot", "ChatGPT-User", "OAI-SearchBot", "ClaudeBot", "Claude-Web", "anthropic-ai",
+  "CCBot", "PerplexityBot", "Google-Extended", "Applebot-Extended", "Bytespider",
+  "Amazonbot", "meta-externalagent", "FacebookBot", "cohere-ai", "omgilibot", "Diffbot",
+];
+
+const ROBOTS_TXT = [
+  `# ${SITE_ORIGIN} —— 视频号视频解析与语音转文字服务`,
+  "",
+  "User-agent: *",
+  "Allow: /",
+  "Disallow: /admin",
+  "Disallow: /api/admin",
+  "",
+  ...AI_BOT_UAS.flatMap((ua) => [
+    `User-agent: ${ua}`,
+    "Allow: /",
+    "Disallow: /admin",
+    "Disallow: /api/admin",
+    "",
+  ]),
+  `Sitemap: ${SITE_ORIGIN}/sitemap.xml`,
+  "",
+  "content-signal: search yes, ai-train no, ai-input yes",
+  "",
+].join("\n");
+
+// MCP Server Card：如实描述 /mcp 端点与 HTTP API（工具列表以 tools/list 实时为准）
+const MCP_SERVER_CARD = {
+  name: MCP_SERVER_INFO.name,
+  version: MCP_SERVER_INFO.version,
+  description:
+    "视频号视频解析与语音转文字服务：解析微信视频号分享链接，返回作者、简介与视频直链（h264/h265），支持视频语音转文字（ASR，消耗服务端付费额度）。同时提供 HTTP API。",
+  endpoints: [
+    {
+      name: "mcp",
+      url: `${SITE_ORIGIN}/mcp`,
+      protocol: "mcp",
+      transport: "streamable-http (stateless)",
+      description:
+        "MCP server：initialize / tools/list / tools/call。工具：parse_channels_video、transcribe_video、get_transcription（可用性随功能开关，以 tools/list 为准）",
+      auth: "由站点管理员配置：开放访问（按 IP 每日限流）或 Bearer 访问令牌",
+    },
+    {
+      name: "http-api",
+      url: `${SITE_ORIGIN}/.well-known/ai-catalog.json`,
+      protocol: "http",
+      description: "本站 HTTP API 机器可读清单（GET）",
+    },
+  ],
+};
+
+// HTTP API 盘点：仅列公开端点（admin 系列需管理员令牌，不对外宣告）
+const AI_CATALOG = {
+  name: MCP_SERVER_INFO.name,
+  description: "sph-probe（视频号解析与语音转文字）公开 HTTP API 盘点",
+  updated: "2026-09-21",
+  apis: [
+    { method: "POST", path: "/api/fetch_video_profile", description: "解析视频号分享链接，返回作者/简介/视频直链。Body: {\"url\": \"https://weixin.qq.com/sph/xxxx\"}", auth: "无（按 IP 每日限流；4A 登录 token 可提升额度）" },
+    { method: "GET", path: "/api/features", description: "功能开关状态（youtube / asr）", auth: "无" },
+    { method: "GET", path: "/api/examples", description: "首页示例分享链接", auth: "无" },
+    { method: "GET", path: "/api/ad", description: "广告位配置", auth: "无" },
+    { method: "POST", path: "/api/asr", description: "视频语音转文字（长视频为异步任务）。Body: {\"url\": \"<视频直链>\", \"shareUrl\": \"<可选缓存键>\"}", auth: "无（按 IP 每日限流）" },
+    { method: "GET", path: "/api/asr/status?jobId=<jobId>", description: "轮询异步转写任务状态", auth: "无" },
+    { method: "GET", path: "/api/youtube/info?url=<url>", description: "YouTube 视频信息解析（仅 VPS 部署，当前停用维护中）", auth: "无" },
+    { method: "GET", path: "/api/youtube/download?url=<url>&quality=<best|audio|itag>", description: "YouTube 流式中转下载（仅 VPS 部署，当前停用维护中）", auth: "无" },
+    { method: "GET", path: "/api/me", description: "当前登录用户信息与剩余额度", auth: "Bearer token（4A 登录）" },
+    { method: "GET", path: "/api/login_config", description: "登录体系配置（是否启用与登录入口）", auth: "无" },
+    { method: "POST", path: "/api/token", description: "OAuth2 授权码交换代理（前端 code + code_verifier 转发 4A）", auth: "无" },
+    { method: "POST", path: "/api/auth/logout", description: "登出（转发 4A 并清理本地验证缓存）", auth: "Bearer token（4A 登录）" },
+    { method: "GET/POST", path: "/mcp", description: "MCP server（Streamable HTTP 无状态）：GET 返回能力信息，POST 为 JSON-RPC", auth: "见 /.well-known/mcp/server-card.json" },
+  ],
+};
+
+// markdown 站点简介：GET / 且 Accept 含 text/markdown 时返回（markdown negotiation）
+const SITE_MARKDOWN = `# sph-probe（${SITE_ORIGIN}）
+
+微信视频号视频解析与语音转文字服务。
+
+## 能力
+
+- **解析分享链接**：POST \`/api/fetch_video_profile\`，Body \`{"url": "https://weixin.qq.com/sph/xxxx"}\`，返回作者、简介与视频直链（h264/h265）
+- **语音转文字（ASR）**：POST \`/api/asr\`（长视频为异步任务，用 \`/api/asr/status?jobId=\` 轮询）；转写消耗服务端付费额度，仅应响应用户的明确转写请求
+- **YouTube**：\`/api/youtube/info\`、\`/api/youtube/download\`（仅 VPS 部署，当前停用维护中）
+
+## 机器可读接口
+
+- MCP server：\`${SITE_ORIGIN}/mcp\`（Streamable HTTP，无状态；工具见 tools/list）
+- MCP Server Card：\`/.well-known/mcp/server-card.json\`
+- HTTP API 清单：\`/.well-known/ai-catalog.json\`
+
+## 额度与登录
+
+匿名按 IP 每日限流；登录 4A 账号（${"https://auth.smartbid.site/login"}）可获得更高独立额度。完整爬虫与 AI 爬虫策略见 \`/robots.txt\`。
+`;
+
 
 // 执行 MCP 工具调用，返回可 JSON 序列化的结果（失败抛错）
 // extra.anonymous：开放访问（无令牌且未登录 4A）调用，ASR 限 5 分钟内视频
