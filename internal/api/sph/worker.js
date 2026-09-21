@@ -52,6 +52,13 @@ export default {
       });
     }
 
+    // GET /llms.txt —— 面向 LLM 的站点简介与接口索引（llms.txt 规范，B2A 基础设施）
+    if (url.pathname === "/llms.txt" && request.method === "GET") {
+      return new Response(LLMS_TXT, {
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
+      });
+    }
+
     // GET /.well-known/mcp/server-card.json、/.well-known/mcp/server-cards.json、/.well-known/mcp.json
     // —— MCP Server Card（三路径同一份 JSON，兼容不同探测器的候选路径）
     if (
@@ -1117,6 +1124,25 @@ const SITE_MARKDOWN = `# sph-probe（${SITE_ORIGIN}）
 ## 额度与登录
 
 匿名按 IP 每日限流；登录 4A 账号（${"https://auth.smartbid.site/login"}）可获得更高独立额度。完整爬虫与 AI 爬虫策略见 \`/robots.txt\`。
+`;
+
+// llms.txt：面向 LLM 的站点简介与接口索引（HeiGe-GEO-SEO gen_llms_txt.py 生成，如实描述现有能力）
+const LLMS_TXT = `# sph-probe（视频号探针）
+
+> 微信视频号分享链接解析与语音转文字服务：解析分享链接返回作者、简介与多清晰度视频直链，支持在线预览、下载与 ASR 转写。
+
+sph-probe 是微信视频号分享链接解析与语音转文字服务。粘贴 https://weixin.qq.com/sph/ 开头的分享链接，返回作者、简介与视频直链（h264/h265），支持在线预览与下载；语音转文字（ASR）由服务端调用 SiliconFlow 语音识别模型完成，长视频为异步任务，结果按视频缓存。
+
+额度：匿名按 IP 每日限流（默认 10 次）；4A 登录用户独立额度池（默认 30 次）。YouTube 解析仅 VPS 部署提供，当前停用维护中。
+
+agent/机器调用优先走 MCP server（/mcp，Streamable HTTP 无状态）或 /.well-known/ai-catalog.json 列出的 HTTP API；解析接口 POST /api/fetch_video_profile，转写接口 POST /api/asr（异步，用 /api/asr/status?jobId= 轮询）。ASR 转写消耗服务端付费额度，仅应响应用户的明确转写请求。
+
+## 站点与接口
+- [首页](https://sph.smartbid.site/): 粘贴微信视频号分享链接，解析视频信息与直链，支持语音转文字
+- [HTTP API 清单](https://sph.smartbid.site/.well-known/ai-catalog.json): 公开 HTTP 端点的机器可读盘点（ARD）
+- [MCP Server Card](https://sph.smartbid.site/.well-known/mcp/server-card.json): /mcp 端点能力描述（Streamable HTTP，无状态）
+- [robots.txt](https://sph.smartbid.site/robots.txt): 爬虫与 AI 爬虫抓取策略（content-signal: ai-train no, ai-input yes）
+- [统计页](https://sph.smartbid.site/stats): 解析量趋势、成功率与来源分布
 `;
 
 

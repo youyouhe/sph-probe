@@ -5,10 +5,91 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- 个性化站点：改这里即可更换品牌名 -->
   <title>视频号探针 · 链接解析</title>
+  <meta name="description" content="视频号探针：粘贴微信视频号分享链接，解析出标题、作者、封面与多清晰度视频直链，支持在线预览、下载与语音转文字（ASR）。">
+  <link rel="canonical" href="https://sph.smartbid.site/">
+  <meta property="og:title" content="视频号探针 · 链接解析">
+  <meta property="og:description" content="粘贴微信视频号分享链接，解析出标题、作者、封面与多清晰度视频直链，支持在线预览、下载与语音转文字（ASR）。">
+  <meta property="og:url" content="https://sph.smartbid.site/">
+  <meta property="og:site_name" content="视频号探针">
+  <meta property="og:type" content="website">
   <link rel="shortcut icon" href="/favicon.ico">
   <link rel="icon" type="image/png" href="/icon.png">
   <!-- Agent 发现：HTTP API 清单（agent-ready ARD，响应头同步携带 Link: rel="ai-catalog"） -->
   <link rel="ai-catalog" href="/.well-known/ai-catalog.json">
+  <!-- 结构化数据（HeiGe-GEO-SEO gen_schema.py 生成，与页面内容区同源） -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    "name": "视频号探针",
+    "url": "https://sph.smartbid.site/",
+    "@id": "https://sph.smartbid.site/#website"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "视频号探针",
+    "url": "https://sph.smartbid.site/",
+    "description": "粘贴微信视频号分享链接，解析出标题、作者、封面与多清晰度视频直链，支持在线预览、下载与语音转文字（ASR）。",
+    "applicationCategory": "WebApplication",
+    "operatingSystem": "Web",
+    "dateModified": "2026-09-22",
+    "browserRequirements": "需要 JavaScript",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
+    "featureList": [
+      "微信视频号分享链接解析（标题、作者、封面、直链）",
+      "多清晰度视频直链（H.264 / H.265）",
+      "在线预览与下载",
+      "视频语音转文字（ASR，异步任务，结果缓存）",
+      "MCP server 与 HTTP API"
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "视频号探针是什么？",
+        "acceptedAnswer": { "@type": "Answer", "text": "视频号探针（sph.smartbid.site）是一个微信视频号分享链接解析工具：粘贴以 https://weixin.qq.com/sph/ 开头的分享链接，即可解析出视频标题、作者、封面与多清晰度（h264/h265）直链，支持在线预览与下载，并可对视频语音转文字。" }
+      },
+      {
+        "@type": "Question",
+        "name": "怎么解析视频号视频？",
+        "acceptedAnswer": { "@type": "Answer", "text": "三步：① 复制视频号分享链接；② 粘贴到首页输入框，点击「解析」；③ 在结果面板选择清晰度后预览或下载，也可复制视频直链。" }
+      },
+      {
+        "@type": "Question",
+        "name": "语音转文字（ASR）怎么用？",
+        "acceptedAnswer": { "@type": "Answer", "text": "解析出视频后点击「转文字」。转写由服务端调用 SiliconFlow 语音识别模型完成，长视频为异步任务，可稍后凭任务 ID 查询进度；同一视频的转写结果会缓存，不会重复消耗额度。Cloudflare 部署模式下超过 25MB 的视频暂无法转写。" }
+      },
+      {
+        "@type": "Question",
+        "name": "每天能解析多少次？",
+        "acceptedAnswer": { "@type": "Answer", "text": "匿名用户按 IP 每天默认 10 次；使用 4A 统一登录后每天默认 30 次，两者是相互独立的额度池。具体剩余次数以页面顶栏展示为准（管理员可在线调整限额）。" }
+      },
+      {
+        "@type": "Question",
+        "name": "使用要付费吗？",
+        "acceptedAnswer": { "@type": "Answer", "text": "解析、预览与下载免费；语音转文字消耗服务端的付费 API 额度，对用户同样免费，但受每日额度限制。" }
+      },
+      {
+        "@type": "Question",
+        "name": "支持 YouTube 吗？",
+        "acceptedAnswer": { "@type": "Answer", "text": "YouTube 解析仅在 VPS 部署下提供，当前停用维护中，恢复后直接可用，无需另行开通。" }
+      },
+      {
+        "@type": "Question",
+        "name": "有 API 或 MCP 接口吗？",
+        "acceptedAnswer": { "@type": "Answer", "text": "有。MCP server 位于 /mcp（Streamable HTTP，工具以 tools/list 为准）；HTTP API 机器可读清单见 /.well-known/ai-catalog.json；爬虫与 AI 爬虫策略见 /robots.txt。" }
+      }
+    ]
+  }
+  </script>
   <style>
     /* ============ 设计令牌 ============ */
     :root {
@@ -250,7 +331,7 @@
       animation: spin 1.6s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .empty h2 {
+    .empty h1 {
       font-size: 17px;
       font-weight: 700;
       letter-spacing: .04em;
@@ -833,6 +914,33 @@
       gap: 14px;
       flex-wrap: wrap;
     }
+    /* ============ 内容结构区（功能说明 / 使用步骤 / 常见问题） ============ */
+    .help {
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 0 20px 8px;
+    }
+    .help h2 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 26px 0 10px;
+      padding-left: 9px;
+      border-left: 3px solid var(--green);
+    }
+    .help p, .help li {
+      font-size: 13px;
+      line-height: 1.8;
+      color: var(--ink-2);
+    }
+    .help ol { padding-left: 20px; }
+    .help dl { margin: 0; }
+    .help dt {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ink);
+      margin-top: 14px;
+    }
+    .help dd { margin: 4px 0 0; }
     .footer a {
       color: var(--green-deep);
       text-decoration: none;
@@ -896,7 +1004,7 @@
       <!-- 空状态：粘贴区 -->
       <div class="empty" id="emptyState">
         <div class="probe-ring" aria-hidden="true"></div>
-        <h2>粘贴视频号分享链接</h2>
+        <h1>粘贴视频号分享链接</h1>
         <p>解析视频信息 · 获取下载地址</p>
         <div class="input-row">
           <input id="urlInput" type="text" placeholder="https://weixin.qq.com/sph/xxx" autocomplete="off" spellcheck="false">
@@ -987,6 +1095,33 @@
   </main>
 
   <div class="ad-slot" id="adFooter" hidden></div>
+
+  <!-- 内容结构区：功能说明 / 使用步骤 / 常见问题（与 head 中 JSON-LD 同源，如实描述站点能力） -->
+  <section class="help" id="help" aria-label="功能说明与常见问题">
+    <h2>功能说明</h2>
+    <p>视频号探针是一个微信视频号分享链接解析工具：粘贴以 <code>https://weixin.qq.com/sph/</code> 开头的分享链接，即可解析出视频标题、作者、封面与多清晰度（h264/h265）直链，支持在线预览与下载，并可对视频语音转文字。解析、预览与下载免费。</p>
+
+    <h2>使用步骤</h2>
+    <ol>
+      <li>复制视频号分享链接；</li>
+      <li>粘贴到首页输入框，点击「解析」；</li>
+      <li>在结果面板选择清晰度后预览或下载，也可复制视频直链；</li>
+      <li>需要文字稿时点击「转文字」，转写由服务端调用 SiliconFlow 语音识别模型完成。</li>
+    </ol>
+
+    <h2>常见问题</h2>
+    <dl>
+      <dt>语音转文字（ASR）怎么用？</dt>
+      <dd>解析出视频后点击「转文字」。长视频为异步任务，可稍后凭任务 ID 查询进度；同一视频的转写结果会缓存，不会重复消耗额度。转写消耗服务端付费 API 额度，对用户免费；Cloudflare 部署模式下超过 25MB 的视频暂无法转写。</dd>
+      <dt>每天能解析多少次？</dt>
+      <dd>匿名用户按 IP 每天默认 10 次；使用 4A 统一登录后每天默认 30 次，两者是相互独立的额度池。具体剩余次数以页面顶栏展示为准（管理员可在线调整限额）。</dd>
+      <dt>支持 YouTube 吗？</dt>
+      <dd>YouTube 解析仅在 VPS 部署下提供，当前停用维护中，恢复后直接可用，无需另行开通。</dd>
+      <dt>有 API 或 MCP 接口吗？</dt>
+      <dd>有。MCP server 位于 <code>/mcp</code>（Streamable HTTP，工具以 tools/list 为准）；HTTP API 机器可读清单见 <code>/.well-known/ai-catalog.json</code>；爬虫与 AI 爬虫策略见 <code>/robots.txt</code>。</dd>
+    </dl>
+  </section>
+
   <footer class="footer">
     <span>仅供学习交流 · 请遵守平台规则</span>
   </footer>
