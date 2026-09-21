@@ -32,23 +32,29 @@ export default {
       });
     }
 
-    // GET / → markdown 协商或 index.html（附 ai-catalog 发现 Link 头）
+    // GET / → markdown 协商或 index.html（附 agent 发现 Link 头）
     if (url.pathname === "/" && request.method === "GET") {
-      const link = '</.well-known/ai-catalog.json>; rel="ai-catalog"';
       if ((request.headers.get("accept") || "").includes("text/markdown")) {
         return new Response(SITE_MARKDOWN, {
-          headers: { "Content-Type": "text/markdown; charset=utf-8", "Cache-Control": "no-cache", Link: link },
+          headers: { "Content-Type": "text/markdown; charset=utf-8", "Cache-Control": "no-cache", Link: DISCOVERY_LINK },
         });
       }
       return new Response(indexHtml, {
-        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache, no-store, must-revalidate", Link: link },
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache, no-store, must-revalidate", Link: DISCOVERY_LINK },
       });
     }
 
     // GET /robots.txt —— 爬虫与 AI 爬虫声明（agent-ready）
     if (url.pathname === "/robots.txt" && request.method === "GET") {
       return new Response(ROBOTS_TXT, {
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        headers: { "Content-Type": "text/plain; charset=utf-8", Link: DISCOVERY_LINK },
+      });
+    }
+
+    // GET /sitemap.xml —— 极简站点地图（robots.txt 的 Sitemap 行指向此处）
+    if (url.pathname === "/sitemap.xml" && request.method === "GET") {
+      return new Response(SITEMAP_XML, {
+        headers: { "Content-Type": "application/xml; charset=utf-8" },
       });
     }
 
@@ -66,6 +72,41 @@ export default {
     // GET /.well-known/ai-catalog.json —— HTTP API 盘点（agent-ready ARD）
     if (url.pathname === "/.well-known/ai-catalog.json" && request.method === "GET") {
       return json(AI_CATALOG);
+    }
+
+    // GET /.well-known/api-catalog —— RFC 9727 API Catalog（探测器探测的是无扩展名路径，
+    // 内容与 ai-catalog.json 同一份盘点）
+    if (url.pathname === "/.well-known/api-catalog" && request.method === "GET") {
+      return json(AI_CATALOG);
+    }
+
+    // GET /.well-known/agent-skills/index.json —— Agent Skills 发现索引（v0.2.0）
+    if (url.pathname === "/.well-known/agent-skills/index.json" && request.method === "GET") {
+      return json(await agentSkillsIndex());
+    }
+
+    // GET /.well-known/agent-skills/<name>/SKILL.md —— 技能正文（索引 url 指向此处）
+    if (url.pathname === SKILL_MD_PATH && request.method === "GET") {
+      return new Response(SKILL_MD, {
+        headers: { "Content-Type": "text/markdown; charset=utf-8", "Cache-Control": "no-cache" },
+      });
+    }
+
+    // GET /.well-known/agent-card.json —— A2A Agent Card（agent-to-agent 发现）
+    if (url.pathname === "/.well-known/agent-card.json" && request.method === "GET") {
+      return json(A2A_AGENT_CARD);
+    }
+
+    // GET /.well-known/oauth-protected-resource —— RFC 9728 受保护资源元数据
+    if (url.pathname === "/.well-known/oauth-protected-resource" && request.method === "GET") {
+      return json(OAUTH_PROTECTED_RESOURCE);
+    }
+
+    // GET /auth.md —— 4A token 获取与使用说明（markdown）
+    if (url.pathname === "/auth.md" && request.method === "GET") {
+      return new Response(AUTH_MD, {
+        headers: { "Content-Type": "text/markdown; charset=utf-8", "Cache-Control": "no-cache" },
+      });
     }
 
     // POST /api/fetch_video_profile
@@ -1018,7 +1059,6 @@ function mcpTools() {
 
 // ---- Agent-Ready 声明（robots.txt / well-known / markdown 协商） ----
 // 按 agent-ready playbook 如实宣告现有能力，供 AI 代理发现；不改动业务解析逻辑。
-// 注意：本站无独立 sitemap 文件，robots.txt 的 Sitemap 行指向站点根（规格要求含该行）。
 
 const SITE_ORIGIN = "https://sph.smartbid.site";
 
@@ -1029,6 +1069,14 @@ const AI_BOT_UAS = [
   "Amazonbot", "meta-externalagent", "FacebookBot", "cohere-ai", "omgilibot", "Diffbot",
 ];
 
+// 关键响应的发现 Link 头（RFC 8288）：一次给出全部 agent 发现入口
+const DISCOVERY_LINK = [
+  '</.well-known/ai-catalog.json>; rel="ai-catalog"',
+  '</.well-known/api-catalog>; rel="api-catalog"',
+  '</auth.md>; rel="describedby"',
+  '</.well-known/oauth-protected-resource>; rel="oauth-protected-resource"',
+].join(", ");
+
 const ROBOTS_TXT = [
   `# ${SITE_ORIGIN} —— 视频号视频解析与语音转文字服务`,
   "",
@@ -1036,6 +1084,8 @@ const ROBOTS_TXT = [
   "Allow: /",
   "Disallow: /admin",
   "Disallow: /api/admin",
+  // Content-Signal 属于 User-agent 组内指令（孤立在组外会被解析到别的组）
+  "content-signal: search yes, ai-train no, ai-input yes",
   "",
   ...AI_BOT_UAS.flatMap((ua) => [
     `User-agent: ${ua}`,
@@ -1045,8 +1095,6 @@ const ROBOTS_TXT = [
     "",
   ]),
   `Sitemap: ${SITE_ORIGIN}/sitemap.xml`,
-  "",
-  "content-signal: search yes, ai-train no, ai-input yes",
   "",
 ].join("\n");
 
@@ -1097,6 +1145,119 @@ const AI_CATALOG = {
   ],
 };
 
+// Agent Skills 发现索引（cloudflare/agent-skills-discovery-rfc v0.2.0）
+// digest 为 SKILL.md 原始字节的 SHA-256（sha256:{hex}），首次请求时计算并缓存
+const SKILL_NAME = "parse-channels-video";
+const SKILL_MD_PATH = `/.well-known/agent-skills/${SKILL_NAME}/SKILL.md`;
+const SKILL_DESCRIPTION =
+  "解析微信视频号分享链接，返回作者、简介与视频直链（h264/h265）。当用户给出 weixin.qq.com/sph 分享链接并想看/下载视频信息时使用。";
+
+const SKILL_MD = `---
+name: ${SKILL_NAME}
+description: ${SKILL_DESCRIPTION}
+---
+
+# 解析视频号分享链接
+
+把微信视频号分享链接（https://weixin.qq.com/sph/xxxx）解析为结构化信息：作者、简介、视频直链（h264/h265）。
+
+## 用法（二选一）
+
+- **MCP**：调用本站 MCP server 的 \`parse_channels_video\` 工具（端点与认证见 /.well-known/mcp/server-card.json）。
+- **HTTP**：POST /api/fetch_video_profile，Body \`{"url": "https://weixin.qq.com/sph/xxxx"}\`。
+
+## 注意
+
+- 匿名调用按 IP 每日限流；携带 4A 登录 token（见 /auth.md）可使用独立额度。
+- 只做信息解析；语音转文字消耗服务端付费额度，仅应在用户明确要求转写时调用 /api/asr。
+`;
+
+let skillDigestPromise = null;
+async function agentSkillsIndex() {
+  if (!skillDigestPromise) {
+    skillDigestPromise = sha256Hex(SKILL_MD);
+  }
+  return {
+    $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+    skills: [
+      {
+        name: SKILL_NAME,
+        type: "skill-md",
+        description: SKILL_DESCRIPTION,
+        url: SKILL_MD_PATH,
+        digest: `sha256:${await skillDigestPromise}`,
+      },
+    ],
+  };
+}
+
+// A2A Agent Card（agent-to-agent 发现）：url 指向本站实际可调用的 MCP 端点
+const A2A_AGENT_CARD = {
+  name: MCP_SERVER_INFO.name,
+  description:
+    "视频号视频解析与语音转文字服务：解析微信视频号分享链接，返回作者、简介与视频直链。url 指向 MCP Streamable HTTP 端点（JSON-RPC，工具以 tools/list 为准）",
+  url: `${SITE_ORIGIN}/mcp`,
+  version: MCP_SERVER_INFO.version,
+  capabilities: {},
+  skills: [
+    {
+      id: SKILL_NAME,
+      name: "视频号视频解析",
+      description: SKILL_DESCRIPTION,
+      tags: ["video", "weixin", "channels", "transcription"],
+    },
+  ],
+};
+
+// RFC 9728 受保护资源元数据：4A 为全站唯一授权服务器，token 一律经 Authorization 头携带
+const OAUTH_PROTECTED_RESOURCE = {
+  resource: SITE_ORIGIN,
+  authorization_servers: ["https://auth.smartbid.site"],
+  bearer_methods_supported: ["header"],
+  resource_documentation: `${SITE_ORIGIN}/auth.md`,
+};
+
+// auth.md —— 4A token 获取与使用说明（workos auth.md 约定，markdown）
+const AUTH_MD = `# 认证说明（auth.md）
+
+${SITE_ORIGIN} 使用 smartbid.site 4A 统一登录（${"https://auth.smartbid.site"}）作为授权服务器。
+匿名调用按 IP 每日限流；携带 4A token 可使用独立的用户额度。
+
+## 获取 token
+
+1. 用浏览器打开登录页 ${"https://auth.smartbid.site/login"}，登录 smartbid.site 4A 账号（OAuth2 授权码 + PKCE）。
+2. 登录成功回跳本站后，前端通过 POST /api/token 用 \`{code, code_verifier, redirect_uri}\` 换取 access token。
+3. token 由本站前端持有；也可登录后从浏览器开发者工具中读取后续请求的 Authorization 头获取。
+
+## 使用 token
+
+所有需要认证的接口均接受 HTTP 头：
+
+\`\`\`
+Authorization: Bearer <token>
+\`\`\`
+
+- GET /api/me —— 查询当前用户身份与剩余额度
+- POST /api/fetch_video_profile —— 视频号解析（用户额度池）
+- POST /api/asr —— 语音转文字（用户额度池）
+- POST /mcp —— MCP 调用（登录用户的 MCP 调用计入用户额度）
+
+## 其他
+
+- 登出：POST /api/auth/logout（携带 Bearer token，转发 4A 并清理本站验证缓存）。
+- token 无效或过期时，接口按匿名处理（受 IP 限流）。
+- 受保护资源元数据：/.well-known/oauth-protected-resource（RFC 9728）。
+`;
+
+// 极简 sitemap：本站为单页应用，仅首页一条
+const SITEMAP_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${SITE_ORIGIN}/</loc>
+  </url>
+</urlset>
+`;
+
 // markdown 站点简介：GET / 且 Accept 含 text/markdown 时返回（markdown negotiation）
 const SITE_MARKDOWN = `# sph-probe（${SITE_ORIGIN}）
 
@@ -1116,7 +1277,7 @@ const SITE_MARKDOWN = `# sph-probe（${SITE_ORIGIN}）
 
 ## 额度与登录
 
-匿名按 IP 每日限流；登录 4A 账号（${"https://auth.smartbid.site/login"}）可获得更高独立额度。完整爬虫与 AI 爬虫策略见 \`/robots.txt\`。
+匿名按 IP 每日限流；登录 4A 账号（${"https://auth.smartbid.site/login"}）可获得更高独立额度。token 获取与使用见 \`/auth.md\`。完整爬虫与 AI 爬虫策略见 \`/robots.txt\`。
 `;
 
 

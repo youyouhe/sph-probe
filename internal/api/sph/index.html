@@ -7,8 +7,11 @@
   <title>视频号探针 · 链接解析</title>
   <link rel="shortcut icon" href="/favicon.ico">
   <link rel="icon" type="image/png" href="/icon.png">
-  <!-- Agent 发现：HTTP API 清单（agent-ready ARD，响应头同步携带 Link: rel="ai-catalog"） -->
+  <!-- Agent 发现（与响应头 Link 一致：ai-catalog / api-catalog / describedby / oauth-protected-resource） -->
   <link rel="ai-catalog" href="/.well-known/ai-catalog.json">
+  <link rel="api-catalog" href="/.well-known/api-catalog">
+  <link rel="describedby" href="/auth.md">
+  <link rel="oauth-protected-resource" href="/.well-known/oauth-protected-resource">
   <style>
     /* ============ 设计令牌 ============ */
     :root {
