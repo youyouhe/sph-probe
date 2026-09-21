@@ -1092,7 +1092,7 @@ const ROBOTS_TXT = [
   "Disallow: /admin",
   "Disallow: /api/admin",
   // Content-Signal 属于 User-agent 组内指令（孤立在组外会被解析到别的组）
-  "content-signal: search yes, ai-train no, ai-input yes",
+  "Content-Signal: search=yes, ai-train=no, ai-input=yes",
   "",
   ...AI_BOT_UAS.flatMap((ua) => [
     `User-agent: ${ua}`,
