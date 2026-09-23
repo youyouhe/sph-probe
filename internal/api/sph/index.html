@@ -1385,7 +1385,7 @@
       try { if (sessionStorage.getItem(LOGOUT_FLAG_KEY)) return; } catch (e) { /* ignore */ }
       // 跨子域 cookie 兜底：用户在别的 smartbid 系产品登录过，这里免登录识别
       const m = document.cookie.match(/(?:^|; )sso_token=([^;]*)/);
-      if (m) ssoSetToken(decodeURIComponent(m[1]));
+      if (m) { try { ssoSetToken(decodeURIComponent(m[1])); } catch (e) { /* 坏 cookie 值，忽略 */ } }
     }
 
     // 删除 4A 写在共享父域上的 sso_token cookie（属性须精确匹配，见 APP_LOGOUT_GUIDE.md §3）
@@ -1483,7 +1483,7 @@
     const toast = $("toast");
 
     $("brandName").textContent = BRAND;
-    $("emptyState").querySelector("h2").textContent = "粘贴" + "视频号" + "分享链接";
+    $("emptyState").querySelector("h1").textContent = "粘贴" + "视频号" + "分享链接";
     $("emptyState").querySelector("p").textContent = SLOGAN;
     document.title = BRAND + " · 链接解析";
 
@@ -2812,17 +2812,25 @@
        换身份与额度 → 渲染顶栏。交换走 /api/token 代理（code+verifier 由本站
        form 转发 4A /oauth2/token，SPA 不直连 4A——不在其 CORS 白名单） */
     void (async () => {
-      const result = await handleOauth2Callback();
-      if (result === "not-callback") initSSO();
-      if (result === "callback-fail" && !ssoGetToken()) await requireLogin();
-      fetch(`${API_BASE}/login_config`)
+      const result = await handleOauth2Callback().catch(() => "not-callback");
+      if (result === "not-callback") { try { initSSO(); } catch (e) { /* ignore */ } }
+      if (result === "callback-fail" && !ssoGetToken()) await requireLogin().catch(() => {});
+      // login_config 探测失败/超时按开启兜底：登录入口不因单点 fetch 失败永久消失
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 3000);
+      fetch(`${API_BASE}/login_config`, { signal: ctrl.signal })
         .then((r) => r.json())
         .then((c) => {
+          clearTimeout(timer);
           ssoLoginEnabled = !!(c && c.ok && c.enabled);
           renderLoginPill();
           return refreshSsoUser();
         })
-        .catch(() => renderLoginPill());
+        .catch(() => {
+          clearTimeout(timer);
+          ssoLoginEnabled = true;
+          renderLoginPill();
+        });
     })();
     $("loginLink").addEventListener("click", (e) => { e.preventDefault(); requireLogin(); });
     $("logoutLink").addEventListener("click", (e) => { e.preventDefault(); logout(); });
