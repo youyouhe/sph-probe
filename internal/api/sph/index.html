@@ -47,7 +47,7 @@
     ]
   }
   </script>
-  <script type="application/ld+json">
+  <script type="application/ld+json" id="ld-faq">
   {
     "@context": "https://schema.org",
     "@type": "FAQPage",
@@ -70,7 +70,7 @@
       {
         "@type": "Question",
         "name": "每天能解析多少次？",
-        "acceptedAnswer": { "@type": "Answer", "text": "匿名用户按 IP 每天默认 10 次；使用 4A 统一登录后每天默认 30 次，两者是相互独立的额度池。具体剩余次数以页面顶栏展示为准（管理员可在线调整限额）。" }
+        "acceptedAnswer": { "@type": "Answer", "text": "匿名与登录用户各有独立的每日免费解析额度，具体剩余次数以页面顶栏展示为准（管理员可在线调整限额）。" }
       },
       {
         "@type": "Question",
@@ -1117,9 +1117,9 @@
       <dt>语音转文字（ASR）怎么用？</dt>
       <dd>解析出视频后点击「转文字」。长视频为异步任务，可稍后凭任务 ID 查询进度；同一视频的转写结果会缓存，不会重复消耗额度。转写消耗服务端付费 API 额度，对用户免费；Cloudflare 部署模式下超过 25MB 的视频暂无法转写。</dd>
       <dt>每天能解析多少次？</dt>
-      <dd>匿名用户按 IP 每天默认 10 次；使用 4A 统一登录后每天默认 30 次，两者是相互独立的额度池。具体剩余次数以页面顶栏展示为准（管理员可在线调整限额）。</dd>
+      <dd id="faqQuotaDd">匿名与登录用户各有独立的每日免费解析额度，具体剩余次数以页面顶栏展示为准（管理员可在线调整限额）。</dd>
       <dt>支持 YouTube 吗？</dt>
-      <dd>YouTube 解析仅在 VPS 部署下提供，当前停用维护中，恢复后直接可用，无需另行开通。</dd>
+      <dd id="faqYoutubeDd">YouTube 解析仅在 VPS 部署下提供，当前停用维护中，恢复后直接可用，无需另行开通。</dd>
       <dt>有 API 或 MCP 接口吗？</dt>
       <dd>有。MCP server 位于 <code>/mcp</code>（Streamable HTTP，工具以 tools/list 为准）；HTTP API 机器可读清单见 <code>/.well-known/ai-catalog.json</code>；爬虫与 AI 爬虫策略见 <code>/robots.txt</code>。</dd>
     </dl>
@@ -1487,13 +1487,45 @@
     $("emptyState").querySelector("p").textContent = SLOGAN;
     document.title = BRAND + " · 链接解析";
 
-    /* 功能开关：屏蔽中的功能隐藏入口（YouTube 标签 / 转文字按钮） */
+    // 同步 head 中 FAQPage JSON-LD 的指定答案，保持结构化数据与页面文案一致
+    function updateFaqLd(question, text) {
+      try {
+        const el = document.getElementById("ld-faq");
+        if (!el) return;
+        const data = JSON.parse(el.textContent);
+        const item = (data.mainEntity || []).find((q) => q.name === question);
+        if (item && item.acceptedAnswer) {
+          item.acceptedAnswer.text = text;
+          el.textContent = JSON.stringify(data);
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    /* 功能开关：屏蔽中的功能隐藏入口（YouTube 标签 / 转文字按钮）；FAQ 同步真实开关与额度，避免文案漂移 */
     fetch(`${API_BASE}/features`)
       .then((r) => r.json())
       .then((f) => {
         if (!f || !f.ok) return;
         if (!f.asr) $("asrBtn").hidden = true;
         if (!f.youtube) document.querySelector('[data-platform="yt"]').hidden = true;
+        if (typeof f.youtube === "boolean") {
+          const ytText = f.youtube
+            ? "支持。粘贴 YouTube 视频链接即可解析并选择清晰度下载（该功能仅在 VPS 部署下提供）。"
+            : "YouTube 解析仅在 VPS 部署下提供，当前停用维护中，恢复后直接可用，无需另行开通。";
+          const dd = $("faqYoutubeDd");
+          if (dd) dd.textContent = ytText;
+          updateFaqLd("支持 YouTube 吗？", ytText);
+        }
+      })
+      .catch(() => {});
+    fetch(`${API_BASE}/quotas`)
+      .then((r) => r.json())
+      .then((q) => {
+        if (!q || !q.ok || !q.anonDaily || !q.userDaily) return;
+        const text = `匿名用户按 IP 每天 ${q.anonDaily} 次；使用 4A 统一登录后每天 ${q.userDaily} 次，两者是相互独立的额度池。具体剩余次数以页面顶栏展示为准。`;
+        const dd = $("faqQuotaDd");
+        if (dd) dd.textContent = text;
+        updateFaqLd("每天能解析多少次？", text);
       })
       .catch(() => {});
 

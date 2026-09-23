@@ -185,6 +185,11 @@ export default {
       return handleFeatures();
     }
 
+    // GET /api/quotas —— 公开额度配置（FAQ 等文案动态展示，避免硬编码过期）
+    if (url.pathname === "/api/quotas" && request.method === "GET") {
+      return handleQuotas(env);
+    }
+
     // GET/POST /api/admin/examples —— 示例链接管理（需 Bearer token）
     if (url.pathname === "/api/admin/examples" && (request.method === "GET" || request.method === "POST")) {
       return handleAdminExamples(request, env);
@@ -277,6 +282,16 @@ const ASR_DISABLED = false; // ASR 语音转文字屏蔽（MCP 匿名调用另�
 // GET /api/features —— 前端按此隐藏已屏蔽功能的入口
 function handleFeatures() {
   return json({ ok: true, youtube: !YT_DISABLED, asr: !ASR_DISABLED });
+}
+
+// GET /api/quotas —— 公开额度配置（与实际限流同源：resolveLimits，KV 在线设置优先）
+async function handleQuotas(env) {
+  try {
+    const { dailyLimit, userDailyLimit } = await resolveLimits(env);
+    return json({ ok: true, anonDaily: dailyLimit, userDaily: userDailyLimit });
+  } catch (e) {
+    return json({ ok: false });
+  }
 }
 
 function corsHeaders() {
@@ -1138,6 +1153,7 @@ const AI_CATALOG = {
   apis: [
     { method: "POST", path: "/api/fetch_video_profile", description: "解析视频号分享链接，返回作者/简介/视频直链。Body: {\"url\": \"https://weixin.qq.com/sph/xxxx\"}", auth: "无（按 IP 每日限流；4A 登录 token 可提升额度）" },
     { method: "GET", path: "/api/features", description: "功能开关状态（youtube / asr）", auth: "无" },
+    { method: "GET", path: "/api/quotas", description: "每日解析额度配置（匿名 / 注册用户，与实际限流同源）", auth: "无" },
     { method: "GET", path: "/api/examples", description: "首页示例分享链接", auth: "无" },
     { method: "GET", path: "/api/ad", description: "广告位配置", auth: "无" },
     { method: "POST", path: "/api/asr", description: "视频语音转文字（长视频为异步任务）。Body: {\"url\": \"<视频直链>\", \"shareUrl\": \"<可选缓存键>\"}", auth: "无（按 IP 每日限流）" },
