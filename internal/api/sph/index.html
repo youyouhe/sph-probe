@@ -1273,8 +1273,9 @@
     const ADMIN_TOKEN_KEY = "sph_admin_token_v1";
 
     /* ============ 4A 统一登录（smartbid.site 全家桶账号） ============ */
-    /* OAuth2 授权码 + PKCE（拷贝自 auth-service pkce-login.js v1.0）；
-       legacy ?sso_token=/cookie 兼容链在共存期保留（APP_INTEGRATION_GUIDE.md §0/§1） */
+    /* OAuth2 授权码 + PKCE（拷贝自 auth-service pkce-login.js v1.0）。
+       legacy ?sso_token= 兜底与跨子域 cookie 读路径已删除（2026-09-25，OAuth2-P6）：
+       身份只经授权码交换落地 localStorage，免登一律走 authorize 静默换发 */
     const SSO_TOKEN_KEY = "access_token";   // 与其他 smartbid 系产品共用同一个 key
     const SSO_COOKIE = "sso_token";
     const LOGOUT_FLAG_KEY = "sso_logged_out";  // 登出抑制标志（防 Auto-SSO 弹回）
@@ -1339,7 +1340,7 @@
       return true;
     }
 
-    // 页面加载时最先调用（先于 initSSO）。返回 'callback-ok'|'callback-fail'|'not-callback'
+    // 页面加载时最先调用。返回 'callback-ok'|'callback-fail'|'not-callback'
     async function handleOauth2Callback() {
       const params = new URLSearchParams(window.location.search);
       const code = params.get("code");
@@ -1377,28 +1378,6 @@
       }
     }
 
-    // 页面加载时调用：legacy 兼容链——URL sso_token 落地 → localStorage → 抑制标志 → 跨子域 cookie 兜底。
-    // 全部家族应用迁完后本函数整体删除
-    function initSSO() {
-      const params = new URLSearchParams(window.location.search);
-      const urlToken = params.get("sso_token");
-      if (urlToken) {
-        ssoSetToken(urlToken);
-        try { sessionStorage.removeItem(LOGOUT_FLAG_KEY); } catch (e) { /* ignore */ }
-        params.delete("sso_token");
-        const newUrl = window.location.pathname +
-          (params.toString() ? "?" + params.toString() : "") + window.location.hash;
-        window.history.replaceState({}, "", newUrl);
-        return;
-      }
-      if (ssoGetToken()) return;
-      // 登出抑制：本标签页显式退出过，不再从共享 cookie 静默恢复登录态
-      try { if (sessionStorage.getItem(LOGOUT_FLAG_KEY)) return; } catch (e) { /* ignore */ }
-      // 跨子域 cookie 兜底：用户在别的 smartbid 系产品登录过，这里免登录识别
-      const m = document.cookie.match(/(?:^|; )sso_token=([^;]*)/);
-      if (m) { try { ssoSetToken(decodeURIComponent(m[1])); } catch (e) { /* 坏 cookie 值，忽略 */ } }
-    }
-
     // 删除 4A 写在共享父域上的 sso_token cookie（属性须精确匹配，见 APP_LOGOUT_GUIDE.md §3）
     function deleteSsoCookie() {
       const labels = window.location.hostname.split(".");
@@ -1419,16 +1398,14 @@
     // 本站登出：清 token + 删共享 cookie + 置抑制标志 + 经服务端代理通知 4A 审计（尽力而为）
     async function logout() {
       const token = ssoGetToken();
-      const cookieToken = (document.cookie.match(/(?:^|; )sso_token=([^;]*)/) || [])[1];
       ssoClearToken();
       deleteSsoCookie();
       try { sessionStorage.setItem(LOGOUT_FLAG_KEY, "1"); } catch (e) { /* ignore */ }
-      const bearer = token || (cookieToken ? decodeURIComponent(cookieToken) : "");
-      if (bearer) {
+      if (token) {
         try {
           await fetch(API_BASE + "/auth/logout", {
             method: "POST",
-            headers: { Authorization: "Bearer " + bearer },
+            headers: { Authorization: "Bearer " + token },
             signal: AbortSignal.timeout(3000),
           });
         } catch (e) { /* 审计尽力而为；401 也算成功 */ }
@@ -2851,12 +2828,13 @@
     loadExamples();
     loadAd();
 
-    /* 4A 登录初始化：OAuth2 回调处理（?code=）优先 → legacy 恢复链 → 查登录开关 →
+    /* 4A 登录初始化：OAuth2 回调处理（?code=）优先 → 查登录开关 →
        换身份与额度 → 渲染顶栏。交换走 /api/token 代理（code+verifier 由本站
-       form 转发 4A /oauth2/token，SPA 不直连 4A——不在其 CORS 白名单） */
+       form 转发 4A /oauth2/token，SPA 不直连 4A——不在其 CORS 白名单）。
+       legacy ?sso_token=/cookie 恢复链已删除；带旧 token 的免登由
+       requireLogin 的 authorize 静默换发承接 */
     void (async () => {
       const result = await handleOauth2Callback().catch(() => "not-callback");
-      if (result === "not-callback") { try { initSSO(); } catch (e) { /* ignore */ } }
       if (result === "callback-fail" && !ssoGetToken()) await requireLogin().catch(() => {});
       // login_config 探测失败/超时按开启兜底：登录入口不因单点 fetch 失败永久消失
       const ctrl = new AbortController();

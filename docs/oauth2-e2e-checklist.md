@@ -14,11 +14,15 @@
 
 ## B. 共存与免登(迁移期特有)
 
+> 迁移台账:**sph-probe 已于 2026-09-25 删除内联 `?sso_token=` 兜底与跨子域 cookie 读路径**
+> (index.html OAuth2-P6 收尾);身份只经授权码交换落地,免登一律走 authorize 静默换发(B2)。
+> B1/B3 在 sph-probe 上按"已删除"预期验收;其他家族应用删除前仍按原预期。
+
 | # | 场景 | 操作 | 预期 |
 |---|------|------|------|
-| B1 | cookie 兜底跨应用免登 | 在未迁移应用登录,再开本应用 | 免登录直接是登录态 |
+| B1 | cookie 兜底跨应用免登 | 在未迁移应用登录,再开本应用 | ~~免登录直接是登录态~~ **sph-probe 已删除 cookie 读路径**:打开即匿名态,点登录后经 authorize 静默换发进入登录态(B2);其他未删兜底的应用仍是免登直进 |
 | B2 | authorize 静默换发 | token 过期后再点登录 | 4A 见 cookie 有效,静默 302 带码回来,全程无登录表单一闪 |
-| B3 | legacy ?sso_token= 直链 | 模拟旧链接 `?sso_token=<token>` | token 落地 localStorage,URL 被清,抑制标志被解除 |
+| B3 | legacy ?sso_token= 直链 | 模拟旧链接 `?sso_token=<token>` | ~~token 落地 localStorage,URL 被清,抑制标志被解除~~ **sph-probe 已删除兜底**:页面按匿名处理,token 不落地 localStorage,URL 参数保留不清(无 handler);其他未删兜底的应用仍是落地+清 URL |
 
 ## C. 登出
 
@@ -44,3 +48,9 @@
 - `oauth2_authorize` 事件计数与 `client_id` 分布(grid/sph/smartbid)
 - legacy `login` 计数应随迁移逐步下降
 - `/oauth2/token` 的 4xx(过期/重放/PKCE 错误)比例异常升高要查前端
+
+## F. legacy 兜底删除后的同步审计(2026-09-25,sph-probe)
+
+- 前端 `index.html`:内联 `?sso_token=` 兜底与 `document.cookie` 读 `sso_token` 路径(含 `logout()` 的 cookie token 回退审计)已全部删除;`deleteSsoCookie()`(写路径)保留——登出/防 Auto-SSO 弹回仍需删共享 cookie(见 C2)。
+- 服务端 `worker.js`:审计通过,无需改动——`bearerToken()` 只读 `Authorization: Bearer` 头,不读 cookie、不收 URL token;4A token 只经前端授权码交换落地。
+- 回归点:handleOauth2Callback 仍在启动序列最前;原 initSSO 的调用时机(非回调时)删除后无副作用——恢复登录态完全由 B2 静默换发承接。
